@@ -1,4 +1,4 @@
--- Serializer.luau (Completo: Terrain por franjas, streaming por disco, IgnoreDefaultProps y recorrido iterativo)
+-- Serializer.luau (Arquitectura por buffer de 64KB, sin cierres por propiedad y segura para UI en móvil)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -74,6 +74,30 @@ local function isDefaultProp(propName: string, val: any): boolean
 		return math.abs(val - def) < 1e-5
 	end
 	return val == def
+end
+
+local function readInstanceProp(inst: Instance, propName: string): (boolean, any)
+	return pcall(function()
+		return (inst :: any)[propName]
+	end)
+end
+
+local function readHiddenProp(inst: Instance, propName: string): (boolean, any)
+	if typeof(gethiddenproperty) ~= "function" then
+		return false, nil
+	end
+	return pcall(gethiddenproperty, inst, propName)
+end
+
+local function isInsideGui(inst: Instance): boolean
+	local cur = inst.Parent
+	while cur do
+		if cur:IsA("LayerCollector") or cur:IsA("GuiObject") then
+			return true
+		end
+		cur = cur.Parent
+	end
+	return false
 end
 
 local function buildSmoothGridBinaryChunked(terrain: Terrain, halfExtentStuds: number, onChunkStep: ((string) -> ())?, isCancelled: (() -> boolean)?): string?
@@ -179,6 +203,8 @@ function Serializer.New(ReflectionModule)
 		KeyframeSequencesCount = 0,
 		Cancelled = false,
 		ChunkBuffer = {},
+		PendingChunkBytes = 0,
+		FlushThresholdBytes = 65536, -- Escribe a disco cada ~64 KB para reducir llamadas nativas
 		StreamFile = nil,
 	}
 
@@ -195,10 +221,11 @@ function Serializer.New(ReflectionModule)
 
 	function self:Flush(force: boolean?)
 		if #self.ChunkBuffer == 0 then return end
-		if not force and #self.ChunkBuffer < 320 then return end
+		if not force and self.PendingChunkBytes < self.FlushThresholdBytes then return end
 
 		local chunk = table.concat(self.ChunkBuffer, "\n") .. "\n"
 		table.clear(self.ChunkBuffer)
+		self.PendingChunkBytes = 0
 
 		if self.StreamFile and typeof(appendfile) == "function" then
 			pcall(appendfile, self.StreamFile, chunk)
@@ -207,8 +234,10 @@ function Serializer.New(ReflectionModule)
 
 	function self:Emit(line: string)
 		table.insert(self.ChunkBuffer, line)
-		self.EstimatedBytes += #line + 1
-		if #self.ChunkBuffer >= 360 then
+		local lineBytes = #line + 1
+		self.EstimatedBytes += lineBytes
+		self.PendingChunkBytes += lineBytes
+		if self.PendingChunkBytes >= self.FlushThresholdBytes then
 			self:Flush(false)
 		end
 	end
@@ -327,7 +356,7 @@ function Serializer.New(ReflectionModule)
 		local total = 0
 		for serviceName, enabled in pairs(options.Services) do
 			if enabled then
-				local ok, service = pcall(function() return game:GetService(serviceName) end)
+				local ok, service = pcall(game.GetService, game, serviceName)
 				if ok and service then
 					total += 1 + #service:GetDescendants()
 				end
@@ -355,6 +384,7 @@ function Serializer.New(ReflectionModule)
 
 		local done = false
 		local outText = "-- [Error decompile]"
+		local limit = timeoutSec or 0.9
 
 		local co = task.spawn(function()
 			local ok, res = pcall(decompile, scriptInstance)
@@ -369,16 +399,16 @@ function Serializer.New(ReflectionModule)
 			end
 		end)
 
-		local limit = timeoutSec or 0.9
-		local t0 = os.clock()
-		while not done and not self.Cancelled and (os.clock() - t0) < limit do
-			task.wait(0.01)
-		end
+		task.delay(limit, function()
+			if not done then
+				done = true
+				pcall(task.cancel, co)
+				outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
+			end
+		end)
 
-		if not done then
-			done = true
-			pcall(task.cancel, co)
-			outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
+		while not done and not self.Cancelled do
+			task.wait(0.05)
 		end
 
 		return outText
@@ -392,6 +422,9 @@ function Serializer.New(ReflectionModule)
 			return true
 		end
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
+			return true
+		end
+		if options.SafeUIMode and instance:IsA("LuaSourceContainer") and isInsideGui(instance) then
 			return true
 		end
 		if instance:IsA("Terrain") and not options.SaveTerrain then
@@ -408,6 +441,7 @@ function Serializer.New(ReflectionModule)
 		end
 
 		local ignoreDefaults = (options.IgnoreDefaultProps ~= false)
+		local skipComplexGui = options.SafeUIMode and instance:IsA("GuiObject")
 		local ref = self:GetReferent(instance)
 		self:Emit(string.format('<Item class="%s" referent="%s">', className, ref))
 		self:Emit("<Properties>")
@@ -415,8 +449,12 @@ function Serializer.New(ReflectionModule)
 		for propName, propType in pairs(props) do
 			if self.Cancelled then break end
 
+			if skipComplexGui and (propType == "Rect" or propType == "ColorSequence" or propType == "NumberSequence") then
+				continue
+			end
+
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
-				local ok, src = pcall(function() return (instance :: any).Source end)
+				local ok, src = readInstanceProp(instance, "Source")
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
 					src = self:DecompileFast(instance, options.DecompileTimeout or 0.9)
 				end
@@ -440,11 +478,9 @@ function Serializer.New(ReflectionModule)
 					self:Flush(true)
 				end
 			elseif propName ~= "MaterialColors" then
-				local ok, val = pcall(function()
-					return (instance :: any)[propName]
-				end)
-				if not ok and typeof(gethiddenproperty) == "function" then
-					ok, val = pcall(gethiddenproperty, instance, propName)
+				local ok, val = readInstanceProp(instance, propName)
+				if not ok and not skipComplexGui then
+					ok, val = readHiddenProp(instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
 					if propName == "Name" or not ignoreDefaults or not isDefaultProp(propName, val) then
@@ -454,17 +490,15 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		if options.SaveTagsAndAttributes then
-			local tagsOk, tags = pcall(function() return CollectionService:GetTags(instance) end)
+		if options.SaveTagsAndAttributes and not skipComplexGui then
+			local tagsOk, tags = pcall(CollectionService.GetTags, CollectionService, instance)
 			if tagsOk and type(tags) == "table" and #tags > 0 then
 				self:Emit(TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
-			if typeof(gethiddenproperty) == "function" then
-				local attrOk, attrBlob = pcall(gethiddenproperty, instance, "AttributesSerialize")
-				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-					self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
-				end
+			local attrOk, attrBlob = readHiddenProp(instance, "AttributesSerialize")
+			if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
+				self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
 			end
 		end
 
@@ -478,7 +512,7 @@ function Serializer.New(ReflectionModule)
 		end
 
 		local stack = { { inst = root, opened = false, hasClosingTag = false } }
-		local yieldEvery = options.YieldEvery or 120
+		local yieldEvery = options.YieldEvery or 140
 
 		while #stack > 0 and not self.Cancelled do
 			local top = stack[#stack]
@@ -492,7 +526,7 @@ function Serializer.New(ReflectionModule)
 				self.ProcessedCount += 1
 				if self.ProcessedCount % yieldEvery == 0 then
 					self:Flush(false)
-					if self.ProcessedCount % 1200 == 0 then
+					if self.ProcessedCount % 1600 == 0 then
 						pcall(collectgarbage, "step", 128)
 					end
 					if onProgress then
@@ -521,6 +555,7 @@ function Serializer.New(ReflectionModule)
 		self.ReferentCount = 0
 		table.clear(self.ReferentMap)
 		table.clear(self.ChunkBuffer)
+		self.PendingChunkBytes = 0
 		self.ProcessedCount = 0
 		self.EstimatedBytes = 0
 		self.DecompiledCount = 0
@@ -557,7 +592,7 @@ function Serializer.New(ReflectionModule)
 		for serviceName, enabled in pairs(options.Services) do
 			if self.Cancelled then break end
 			if enabled then
-				local ok, service = pcall(function() return game:GetService(serviceName) end)
+				local ok, service = pcall(game.GetService, game, serviceName)
 				if ok and service then
 					self:TraverseIterative(service, options, onProgress)
 				end
