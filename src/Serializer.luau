@@ -341,13 +341,13 @@ function Serializer.New(ReflectionModule)
 		NumberRange = function(name, val)
 			return string.format('<NumberRange name="%s">%s %s </NumberRange>', name, val.Min, val.Max)
 		end,
-		ColorSequence = function(name, val)
-			local parts = {}
-			for _, kp in ipairs(val.Keypoints) do
-				table.insert(parts, string.format("%s %s %s %s %s", kp.Time, kp.Value.R, kp.Value.G, kp.Value.B, kp.Envelope or 0))
-			end
-			return string.format('<ColorSequence name="%s">%s </ColorSequence>', name, table.concat(parts, " "))
-		end,
+	ColorSequence = function(name, val)
+	local parts = {}
+	for _, kp in ipairs(val.Keypoints) do
+		table.insert(parts, string.format("%s %s %s %s 0", kp.Time, kp.Value.R, kp.Value.G, kp.Value.B))
+	end
+	return string.format('<ColorSequence name="%s">%s </ColorSequence>', name, table.concat(parts, " "))
+end,
 		NumberSequence = function(name, val)
 			local parts = {}
 			for _, kp in ipairs(val.Keypoints) do
