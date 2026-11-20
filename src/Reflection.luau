@@ -9,45 +9,99 @@ local Classes = {
 		}
 	},
 
-	-- Servicios y contenedores
-	Workspace = { Inherits = "Model", Properties = { Gravity = "float" } },
+	-- Servicios y entorno
+	Workspace = {
+		Inherits = "Model",
+		Properties = {
+			Gravity = "float",
+			FallenPartsDestroyHeight = "float",
+			CurrentCamera = "Ref",
+		}
+	},
+	Camera = {
+		Inherits = "Instance",
+		Properties = {
+			CFrame = "CoordinateFrame",
+			Focus = "CoordinateFrame",
+			FieldOfView = "float",
+			CameraType = "token",
+			HeadLocked = "bool",
+			HeadScale = "float",
+		}
+	},
+	Terrain = {
+		Inherits = "BasePart",
+		Properties = {
+			WaterColor = "Color3",
+			WaterReflectance = "float",
+			WaterTransparency = "float",
+			WaterWaveSize = "float",
+			WaterWaveSpeed = "float",
+			Decoration = "bool",
+		}
+	},
 	Lighting = {
 		Inherits = "Instance",
 		Properties = {
 			Ambient = "Color3",
 			OutdoorAmbient = "Color3",
+			ColorShift_Bottom = "Color3",
+			ColorShift_Top = "Color3",
 			Brightness = "float",
 			ClockTime = "float",
 			GeographicLatitude = "float",
+			ExposureCompensation = "float",
 			GlobalShadows = "bool",
 			EnvironmentDiffuseScale = "float",
 			EnvironmentSpecularScale = "float",
+			ShadowSoftness = "float",
 		}
 	},
 	ReplicatedStorage = { Inherits = "Instance", Properties = {} },
 	ReplicatedFirst = { Inherits = "Instance", Properties = {} },
 	StarterGui = { Inherits = "Instance", Properties = {} },
 	StarterPack = { Inherits = "Instance", Properties = {} },
-	StarterPlayer = { Inherits = "Instance", Properties = {} },
+	StarterPlayer = {
+		Inherits = "Instance",
+		Properties = {
+			CharacterWalkSpeed = "float",
+			CharacterJumpPower = "float",
+			CharacterJumpHeight = "float",
+			CharacterUseJumpPower = "bool",
+			DevCameraOcclusionMode = "token",
+			DevComputerCameraMode = "token",
+			DevComputerMovementMode = "token",
+		}
+	},
 	StarterPlayerScripts = { Inherits = "Instance", Properties = {} },
 	StarterCharacterScripts = { Inherits = "Instance", Properties = {} },
-	SoundService = { Inherits = "Instance", Properties = { AmbientReverb = "token", RespectFilteringEnabled = "bool" } },
+	SoundService = {
+		Inherits = "Instance",
+		Properties = {
+			AmbientReverb = "token",
+			RespectFilteringEnabled = "bool",
+			VolumetricAudio = "token",
+		}
+	},
 
-	-- Partes y geometría
+	-- Partes, geometría y contenedores
 	BasePart = {
 		Inherits = "Instance",
 		Properties = {
 			CFrame = "CoordinateFrame",
 			Size = "Vector3",
 			Color = "Color3uint8",
+			BrickColor = "BrickColor",
 			Material = "token",
 			Anchored = "bool",
 			CanCollide = "bool",
 			CanTouch = "bool",
 			CanQuery = "bool",
+			Massless = "bool",
 			Transparency = "float",
 			Reflectance = "float",
 			CastShadow = "bool",
+			CustomPhysicalProperties = "PhysicalProperties",
 		}
 	},
 	Part = { Inherits = "BasePart", Properties = { Shape = "token" } },
@@ -55,8 +109,24 @@ local Classes = {
 	CornerWedgePart = { Inherits = "BasePart", Properties = {} },
 	TrussPart = { Inherits = "BasePart", Properties = { Style = "token" } },
 	Seat = { Inherits = "Part", Properties = { Disabled = "bool" } },
-	VehicleSeat = { Inherits = "Part", Properties = { Disabled = "bool", MaxSpeed = "float", SteerFloat = "float", ThrottleFloat = "float" } },
-	SpawnLocation = { Inherits = "Part", Properties = { Duration = "int", Neutral = "bool", Enabled = "bool" } },
+	VehicleSeat = {
+		Inherits = "Part",
+		Properties = {
+			Disabled = "bool",
+			MaxSpeed = "float",
+			Torque = "float",
+			TurnSpeed = "float",
+		}
+	},
+	SpawnLocation = {
+		Inherits = "Part",
+		Properties = {
+			Duration = "int",
+			Neutral = "bool",
+			Enabled = "bool",
+			AllowTeamChangeOnTouch = "bool",
+		}
+	},
 	MeshPart = {
 		Inherits = "BasePart",
 		Properties = {
@@ -83,6 +153,7 @@ local Classes = {
 			Enabled = "bool",
 		}
 	},
+	Backpack = { Inherits = "Instance", Properties = {} },
 
 	-- Scripts
 	BaseScript = {
@@ -101,7 +172,64 @@ local Classes = {
 		}
 	},
 
-	-- Efectos visuales, iluminación y audio
+	-- Rigs y Animaciones
+	Humanoid = {
+		Inherits = "Instance",
+		Properties = {
+			WalkSpeed = "float",
+			JumpPower = "float",
+			JumpHeight = "float",
+			HipHeight = "float",
+			MaxHealth = "float",
+			Health = "float",
+			RigType = "token",
+			DisplayName = "string",
+			RequiresNeck = "bool",
+			AutoRotate = "bool",
+		}
+	},
+	AnimationController = { Inherits = "Instance", Properties = {} },
+	Animator = { Inherits = "Instance", Properties = {} },
+	Animation = {
+		Inherits = "Instance",
+		Properties = {
+			AnimationId = "Content",
+		}
+	},
+	KeyframeSequence = {
+		Inherits = "Instance",
+		Properties = {
+			Loop = "bool",
+			Priority = "token",
+		}
+	},
+	Keyframe = {
+		Inherits = "Instance",
+		Properties = {
+			Time = "float",
+		}
+	},
+	Pose = {
+		Inherits = "Instance",
+		Properties = {
+			CFrame = "CoordinateFrame",
+			Weight = "float",
+			EasingStyle = "token",
+			EasingDirection = "token",
+		}
+	},
+
+	-- Apariencia, efectos visuales, iluminación y audio
+	SurfaceAppearance = {
+		Inherits = "Instance",
+		Properties = {
+			ColorMap = "Content",
+			NormalMap = "Content",
+			RoughnessMap = "Content",
+			MetalnessMap = "Content",
+			AlphaMode = "token",
+		}
+	},
 	SpecialMesh = {
 		Inherits = "Instance",
 		Properties = {
@@ -110,6 +238,7 @@ local Classes = {
 			MeshType = "token",
 			Scale = "Vector3",
 			Offset = "Vector3",
+			VertexColor = "Vector3",
 		}
 	},
 	Decal = {
@@ -119,6 +248,7 @@ local Classes = {
 			Face = "token",
 			Transparency = "float",
 			Color3 = "Color3",
+			ZIndex = "int",
 		}
 	},
 	Texture = {
@@ -134,10 +264,12 @@ local Classes = {
 			Texture = "Content",
 			Color = "ColorSequence",
 			Size = "NumberSequence",
+			Squash = "NumberSequence",
 			Transparency = "NumberSequence",
 			Lifetime = "NumberRange",
 			Rate = "float",
 			Speed = "NumberRange",
+			SpreadAngle = "Vector2",
 			Rotation = "NumberRange",
 			RotSpeed = "NumberRange",
 			LightEmission = "float",
@@ -146,12 +278,15 @@ local Classes = {
 			Acceleration = "Vector3",
 			Enabled = "bool",
 			LockedToPart = "bool",
+			ZOffset = "float",
 		}
 	},
 	Beam = {
 		Inherits = "Instance",
 		Properties = {
 			Texture = "Content",
+			TextureSpeed = "float",
+			TextureLength = "float",
 			Color = "ColorSequence",
 			Width0 = "float",
 			Width1 = "float",
@@ -179,6 +314,7 @@ local Classes = {
 			Attachment0 = "Ref",
 			Attachment1 = "Ref",
 			Enabled = "bool",
+			FaceCamera = "bool",
 		}
 	},
 	PointLight = {
@@ -235,15 +371,28 @@ local Classes = {
 			SkyboxLf = "Content",
 			SkyboxRt = "Content",
 			SkyboxUp = "Content",
+			SunTextureId = "Content",
+			MoonTextureId = "Content",
 			SunAngularSize = "float",
 			MoonAngularSize = "float",
 			CelestialBodiesShown = "bool",
+			StarCount = "int",
+		}
+	},
+	Clouds = {
+		Inherits = "Instance",
+		Properties = {
+			Cover = "float",
+			Density = "float",
+			Color = "Color3",
+			Enabled = "bool",
 		}
 	},
 	BloomEffect = { Inherits = "Instance", Properties = { Enabled = "bool", Intensity = "float", Size = "float", Threshold = "float" } },
 	ColorCorrectionEffect = { Inherits = "Instance", Properties = { Enabled = "bool", TintColor = "Color3", Brightness = "float", Contrast = "float", Saturation = "float" } },
 	SunRaysEffect = { Inherits = "Instance", Properties = { Enabled = "bool", Intensity = "float", Spread = "float" } },
 	BlurEffect = { Inherits = "Instance", Properties = { Enabled = "bool", Size = "float" } },
+	DepthOfFieldEffect = { Inherits = "Instance", Properties = { Enabled = "bool", FarIntensity = "float", FocusDistance = "float", InFocusRadius = "float", NearIntensity = "float" } },
 	Sound = {
 		Inherits = "Instance",
 		Properties = {
@@ -251,25 +400,81 @@ local Classes = {
 			Volume = "float",
 			PlaybackSpeed = "float",
 			Looped = "bool",
+			PlayOnRemove = "bool",
 			RollOffMinDistance = "float",
 			RollOffMaxDistance = "float",
+			RollOffMode = "token",
 		}
 	},
+	SoundGroup = { Inherits = "Instance", Properties = { Volume = "float" } },
+	EqualizerSoundEffect = { Inherits = "Instance", Properties = { HighGain = "float", LowGain = "float", MidGain = "float", Enabled = "bool" } },
+	ReverbSoundEffect = { Inherits = "Instance", Properties = { DecayTime = "float", Density = "float", Diffusion = "float", DryLevel = "float", WetLevel = "float", Enabled = "bool" } },
 
-	-- Interacción y conexiones
+	-- Física, attachments y conexiones
 	Attachment = { Inherits = "Instance", Properties = { CFrame = "CoordinateFrame", Visible = "bool" } },
+	Weld = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", C0 = "CoordinateFrame", C1 = "CoordinateFrame", Enabled = "bool" } },
 	WeldConstraint = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", Enabled = "bool" } },
 	Motor6D = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", C0 = "CoordinateFrame", C1 = "CoordinateFrame", Enabled = "bool" } },
+	HingeConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			Attachment0 = "Ref",
+			Attachment1 = "Ref",
+			Enabled = "bool",
+			ActuatorType = "token",
+			AngularSpeed = "float",
+			MotorMaxTorque = "float",
+			TargetAngle = "float",
+		}
+	},
+	SpringConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			Attachment0 = "Ref",
+			Attachment1 = "Ref",
+			Enabled = "bool",
+			Coils = "float",
+			Damping = "float",
+			FreeLength = "float",
+			LimitsEnabled = "bool",
+			MaxLength = "float",
+			MinLength = "float",
+			Stiffness = "float",
+		}
+	},
+	RopeConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			Attachment0 = "Ref",
+			Attachment1 = "Ref",
+			Enabled = "bool",
+			Length = "float",
+			Restitution = "float",
+		}
+	},
+	RodConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			Attachment0 = "Ref",
+			Attachment1 = "Ref",
+			Enabled = "bool",
+			Length = "float",
+			Thickness = "float",
+		}
+	},
 	ProximityPrompt = {
 		Inherits = "Instance",
 		Properties = {
 			ActionText = "string",
 			ObjectText = "string",
 			KeyboardKeyCode = "token",
+			GamepadKeyCode = "token",
 			HoldDuration = "float",
 			MaxActivationDistance = "float",
 			RequiresLineOfSight = "bool",
+			ClickablePrompt = "bool",
 			Enabled = "bool",
+			Style = "token",
 		}
 	},
 	ClickDetector = { Inherits = "Instance", Properties = { MaxActivationDistance = "float", CursorIcon = "Content" } },
@@ -288,7 +493,7 @@ local Classes = {
 	Vector3Value = { Inherits = "Instance", Properties = { Value = "Vector3" } },
 	CFrameValue = { Inherits = "Instance", Properties = { Value = "CoordinateFrame" } },
 
-	-- UI (GuiBase2d / GuiObject / UI modifiers)
+	-- UI
 	ScreenGui = {
 		Inherits = "Instance",
 		Properties = {
@@ -296,6 +501,7 @@ local Classes = {
 			ResetOnSpawn = "bool",
 			DisplayOrder = "int",
 			IgnoreGuiInset = "bool",
+			ZIndexBehavior = "token",
 		}
 	},
 	BillboardGui = {
@@ -304,8 +510,10 @@ local Classes = {
 			Enabled = "bool",
 			Size = "UDim2",
 			StudsOffset = "Vector3",
+			StudsOffsetWorldSpace = "Vector3",
 			AlwaysOnTop = "bool",
 			MaxDistance = "float",
+			Active = "bool",
 		}
 	},
 	SurfaceGui = {
@@ -314,6 +522,8 @@ local Classes = {
 			Enabled = "bool",
 			Face = "token",
 			AlwaysOnTop = "bool",
+			SizingMode = "token",
+			PixelsPerStud = "float",
 		}
 	},
 	GuiObject = {
@@ -322,22 +532,39 @@ local Classes = {
 			Position = "UDim2",
 			Size = "UDim2",
 			AnchorPoint = "Vector2",
+			Rotation = "float",
 			BackgroundColor3 = "Color3",
 			BackgroundTransparency = "float",
+			BorderColor3 = "Color3",
 			BorderSizePixel = "int",
 			Visible = "bool",
 			ZIndex = "int",
 			LayoutOrder = "int",
+			ClipsDescendants = "bool",
 		}
 	},
 	Frame = { Inherits = "GuiObject", Properties = {} },
+	ViewportFrame = {
+		Inherits = "GuiObject",
+		Properties = {
+			ImageColor3 = "Color3",
+			ImageTransparency = "float",
+			Ambient = "Color3",
+			LightColor = "Color3",
+			LightDirection = "Vector3",
+			CurrentCamera = "Ref",
+		}
+	},
 	ScrollingFrame = {
 		Inherits = "GuiObject",
 		Properties = {
 			CanvasSize = "UDim2",
 			CanvasPosition = "Vector2",
 			ScrollBarThickness = "int",
+			ScrollBarImageColor3 = "Color3",
+			ScrollBarImageTransparency = "float",
 			ScrollingDirection = "token",
+			AutomaticCanvasSize = "token",
 		}
 	},
 	TextLabel = {
@@ -345,23 +572,30 @@ local Classes = {
 		Properties = {
 			Text = "string",
 			TextColor3 = "Color3",
+			TextTransparency = "float",
 			TextSize = "float",
 			TextScaled = "bool",
+			TextWrapped = "bool",
 			RichText = "bool",
 			Font = "token",
+			TextXAlignment = "token",
+			TextYAlignment = "token",
 		}
 	},
 	TextButton = {
 		Inherits = "TextLabel",
 		Properties = {
 			AutoButtonColor = "bool",
+			Modal = "bool",
 		}
 	},
 	TextBox = {
 		Inherits = "TextLabel",
 		Properties = {
 			PlaceholderText = "string",
+			PlaceholderColor3 = "Color3",
 			ClearTextOnFocus = "bool",
+			MultiLine = "bool",
 		}
 	},
 	ImageLabel = {
@@ -370,13 +604,19 @@ local Classes = {
 			Image = "Content",
 			ImageColor3 = "Color3",
 			ImageTransparency = "float",
+			ImageRectOffset = "Vector2",
+			ImageRectSize = "Vector2",
 			ScaleType = "token",
+			SliceCenter = "Rect",
+			SliceScale = "float",
 		}
 	},
 	ImageButton = {
 		Inherits = "ImageLabel",
 		Properties = {
 			AutoButtonColor = "bool",
+			HoverImage = "Content",
+			PressedImage = "Content",
 		}
 	},
 	UICorner = { Inherits = "Instance", Properties = { CornerRadius = "UDim" } },
@@ -387,6 +627,8 @@ local Classes = {
 			Thickness = "float",
 			Transparency = "float",
 			ApplyStrokeMode = "token",
+			LineJoinMode = "token",
+			Enabled = "bool",
 		}
 	},
 	UIGradient = {
@@ -408,6 +650,28 @@ local Classes = {
 			PaddingRight = "UDim",
 		}
 	},
+	UIAspectRatioConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			AspectRatio = "float",
+			AspectType = "token",
+			DominantAxis = "token",
+		}
+	},
+	UISizeConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			MinSize = "Vector2",
+			MaxSize = "Vector2",
+		}
+	},
+	UITextSizeConstraint = {
+		Inherits = "Instance",
+		Properties = {
+			MinTextSize = "int",
+			MaxTextSize = "int",
+		}
+	},
 	UIListLayout = {
 		Inherits = "Instance",
 		Properties = {
@@ -424,6 +688,9 @@ local Classes = {
 			CellSize = "UDim2",
 			CellPadding = "UDim2",
 			FillDirection = "token",
+			FillDirectionMaxCells = "int",
+			HorizontalAlignment = "token",
+			VerticalAlignment = "token",
 			SortOrder = "token",
 		}
 	},
