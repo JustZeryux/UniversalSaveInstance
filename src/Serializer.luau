@@ -1,8 +1,18 @@
--- Serializer.luau (Completo: Caja negra anti-crash, optimización de strings, Terrain, UI, Scripts y NilInstances)
+-- Serializer.luau (Versión modular optimizada: 120k+ instancias, Terrain por franjas, buffer 64KB y pila O(1))
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
 local Serializer = {}
+
+local function clearTable(t: {[any]: any})
+	if table.clear then
+		table.clear(t)
+	else
+		for k in pairs(t) do
+			t[k] = nil
+		end
+	end
+end
 
 local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local function toBase64(data: string): string
@@ -32,7 +42,6 @@ local function toBase64(data: string): string
 	return table.concat(out)
 end
 
--- Solo escapa si existen caracteres XML especiales (ahorra memoria en UI y nombres)
 local function escapeXml(str: string): string
 	if not string.find(str, '[&<>"\']') then
 		return str
@@ -80,17 +89,15 @@ local function isDefaultProp(propName: string, val: any): boolean
 	return val == def
 end
 
-local function readInstanceProp(inst: Instance, propName: string): (boolean, any)
-	return pcall(function()
-		return (inst :: any)[propName]
-	end)
-end
-
-local function readHiddenProp(inst: Instance, propName: string): (boolean, any)
-	if typeof(gethiddenproperty) ~= "function" then
-		return false, nil
+local function isInsideGui(inst: Instance): boolean
+	local cur = inst.Parent
+	while cur do
+		if cur:IsA("LayerCollector") or cur:IsA("GuiObject") then
+			return true
+		end
+		cur = cur.Parent
 	end
-	return pcall(gethiddenproperty, inst, propName)
+	return false
 end
 
 local function buildSmoothGridBinaryChunked(
@@ -103,9 +110,7 @@ local function buildSmoothGridBinaryChunked(
 	local stepSize = 32
 	local minY, maxY = -64, 64
 
-	if markStep then
-		markStep("Terrain.ReadVoxels probe")
-	end
+	if markStep then markStep("Terrain probe") end
 
 	local fullRegion = Region3.new(
 		Vector3.new(-halfExtentStuds, minY, -halfExtentStuds),
@@ -151,7 +156,6 @@ local function buildSmoothGridBinaryChunked(
 		if isCancelled and isCancelled() then
 			return nil
 		end
-
 		if markStep then
 			markStep(string.format("Terrain slice %d/%d", s + 1, slices))
 		end
@@ -214,7 +218,6 @@ function Serializer.New(ReflectionModule)
 		FlushThresholdBytes = 65536,
 		StreamFile = nil,
 		CheckpointFile = "ZeryuxDump_LastStep.txt",
-		DecompileDisabledForRun = false,
 	}
 
 	function self:RecordStep(detail: string)
@@ -239,7 +242,7 @@ function Serializer.New(ReflectionModule)
 		if not force and self.PendingChunkBytes < self.FlushThresholdBytes then return end
 
 		local chunk = table.concat(self.ChunkBuffer, "\n") .. "\n"
-		table.clear(self.ChunkBuffer)
+		clearTable(self.ChunkBuffer)
 		self.PendingChunkBytes = 0
 
 		if self.StreamFile and typeof(appendfile) == "function" then
@@ -393,11 +396,11 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:DecompileFast(scriptInstance: Instance, timeoutSec: number): string
-		if self.DecompileDisabledForRun or typeof(decompile) ~= "function" then
-			return "-- [Decompile omitido/no disponible]"
+		if typeof(decompile) ~= "function" then
+			return "-- [Sin decompile]"
 		end
 
-		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance:GetFullName())
+		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
 
 		local done = false
 		local outText = "-- [Error decompile]"
@@ -416,15 +419,16 @@ function Serializer.New(ReflectionModule)
 			end
 		end)
 
-		local t0 = os.clock()
-		while not done and not self.Cancelled and (os.clock() - t0) < limit do
-			task.wait(0.03)
-		end
+		task.delay(limit, function()
+			if not done then
+				done = true
+				pcall(task.cancel, co)
+				outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
+			end
+		end)
 
-		if not done then
-			done = true
-			pcall(task.cancel, co)
-			outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
+		while not done and not self.Cancelled do
+			task.wait(0.03)
 		end
 
 		return outText
@@ -440,10 +444,26 @@ function Serializer.New(ReflectionModule)
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
 			return true
 		end
+		if options.SafeUIMode and instance:IsA("LuaSourceContainer") and isInsideGui(instance) then
+			return true
+		end
 		if instance:IsA("Terrain") and not options.SaveTerrain then
 			return true
 		end
 		return false
+	end
+
+	local function getPropValue(inst: Instance, propName: string): (boolean, any)
+		return pcall(function()
+			return (inst :: any)[propName]
+		end)
+	end
+
+	local function getHiddenValue(inst: Instance, propName: string): (boolean, any)
+		if typeof(gethiddenproperty) ~= "function" then
+			return false, nil
+		end
+		return pcall(gethiddenproperty, inst, propName)
 	end
 
 	function self:WriteNodeOpen(instance: Instance, options, onProgress)
@@ -467,7 +487,7 @@ function Serializer.New(ReflectionModule)
 			end
 
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
-				local ok, src = readInstanceProp(instance, "Source")
+				local ok, src = getPropValue(instance, "Source")
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
 					src = self:DecompileFast(instance, options.DecompileTimeout or 0.9)
 				end
@@ -492,10 +512,9 @@ function Serializer.New(ReflectionModule)
 					self:Flush(true)
 				end
 			elseif propName ~= "MaterialColors" then
-				local ok, val = readInstanceProp(instance, propName)
+				local ok, val = getPropValue(instance, propName)
 				if not ok and not skipComplexGui then
-					self:RecordStep("HIDDEN_PROP -> " .. className .. "." .. propName .. " (" .. instance.Name .. ")")
-					ok, val = readHiddenProp(instance, propName)
+					ok, val = getHiddenValue(instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
 					if propName == "Name" or not ignoreDefaults or not isDefaultProp(propName, val) then
@@ -511,12 +530,9 @@ function Serializer.New(ReflectionModule)
 				self:Emit(TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
-			if typeof(gethiddenproperty) == "function" then
-				self:RecordStep("ATTR -> " .. className .. " (" .. instance.Name .. ")")
-				local attrOk, attrBlob = readHiddenProp(instance, "AttributesSerialize")
-				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-					self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
-				end
+			local attrOk, attrBlob = getHiddenValue(instance, "AttributesSerialize")
+			if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
+				self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
 			end
 		end
 
@@ -530,16 +546,17 @@ function Serializer.New(ReflectionModule)
 		end
 
 		local stack = { { inst = root, opened = false, hasClosingTag = false } }
+		local top = 1
 		local yieldEvery = options.YieldEvery or 140
 
-		while #stack > 0 and not self.Cancelled do
-			local top = stack[#stack]
-			local inst = top.inst
+		while top > 0 and not self.Cancelled do
+			local entry = stack[top]
+			local inst = entry.inst
 
-			if not top.opened then
-				top.opened = true
+			if not entry.opened then
+				entry.opened = true
 				local openedItem = self:WriteNodeOpen(inst, options, onProgress)
-				top.hasClosingTag = openedItem
+				entry.hasClosingTag = openedItem
 
 				self.ProcessedCount += 1
 				if self.ProcessedCount % yieldEvery == 0 then
@@ -558,22 +575,24 @@ function Serializer.New(ReflectionModule)
 				for i = #children, 1, -1 do
 					local child = children[i]
 					if not self:ShouldSkip(child, options) then
-						table.insert(stack, { inst = child, opened = false, hasClosingTag = false })
+						top += 1
+						stack[top] = { inst = child, opened = false, hasClosingTag = false }
 					end
 				end
 			else
-				if top.hasClosingTag then
+				if entry.hasClosingTag then
 					self:Emit("</Item>")
 				end
-				table.remove(stack)
+				stack[top] = nil
+				top -= 1
 			end
 		end
 	end
 
 	function self:RunToFile(fileName: string?, options, onProgress): (boolean, string, number)
 		self.ReferentCount = 0
-		table.clear(self.ReferentMap)
-		table.clear(self.ChunkBuffer)
+		clearTable(self.ReferentMap)
+		clearTable(self.ChunkBuffer)
 		self.PendingChunkBytes = 0
 		self.ProcessedCount = 0
 		self.EstimatedBytes = 0
@@ -581,9 +600,8 @@ function Serializer.New(ReflectionModule)
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
 		self.Cancelled = false
-		self.DecompileDisabledForRun = false
 
-		self:RecordStep("START RunToFile -> " .. tostring(fileName))
+		self:RecordStep("START -> " .. tostring(fileName))
 
 		local canStream = (fileName ~= nil) and (typeof(writefile) == "function") and (typeof(appendfile) == "function")
 		self.StreamFile = canStream and fileName or nil
@@ -671,7 +689,7 @@ function Serializer.New(ReflectionModule)
 			return true, self.StreamFile, self.EstimatedBytes
 		elseif typeof(writefile) == "function" and fileName then
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
-			table.clear(self.ChunkBuffer)
+			clearTable(self.ChunkBuffer)
 			local okW, errW = pcall(writefile, fileName, fullXml)
 			if not okW then
 				return false, "Error writefile: " .. tostring(errW), #fullXml
@@ -679,7 +697,7 @@ function Serializer.New(ReflectionModule)
 			return true, fileName, #fullXml
 		else
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
-			table.clear(self.ChunkBuffer)
+			clearTable(self.ChunkBuffer)
 			return true, "MEMORIA", #fullXml
 		end
 	end
