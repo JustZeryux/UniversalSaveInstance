@@ -1,4 +1,4 @@
--- Serializer.luau (Arquitectura por buffer de 64KB, sin cierres por propiedad y segura para UI en móvil)
+-- Serializer.luau (Completo: Caja negra anti-crash, optimización de strings, Terrain, UI, Scripts y NilInstances)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -32,7 +32,11 @@ local function toBase64(data: string): string
 	return table.concat(out)
 end
 
+-- Solo escapa si existen caracteres XML especiales (ahorra memoria en UI y nombres)
 local function escapeXml(str: string): string
+	if not string.find(str, '[&<>"\']') then
+		return str
+	end
 	return str:gsub("&", "&amp;")
 		:gsub("<", "&lt;")
 		:gsub(">", "&gt;")
@@ -41,7 +45,7 @@ local function escapeXml(str: string): string
 end
 
 local function formatProtectedString(name: string, src: string): string
-	local safeCdata = string.gsub(src, "]]>", "]]]]><![CDATA[>")
+	local safeCdata = string.find(src, "]]>", 1, true) and string.gsub(src, "]]>", "]]]]><![CDATA[>") or src
 	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
 end
 
@@ -89,20 +93,19 @@ local function readHiddenProp(inst: Instance, propName: string): (boolean, any)
 	return pcall(gethiddenproperty, inst, propName)
 end
 
-local function isInsideGui(inst: Instance): boolean
-	local cur = inst.Parent
-	while cur do
-		if cur:IsA("LayerCollector") or cur:IsA("GuiObject") then
-			return true
-		end
-		cur = cur.Parent
-	end
-	return false
-end
-
-local function buildSmoothGridBinaryChunked(terrain: Terrain, halfExtentStuds: number, onChunkStep: ((string) -> ())?, isCancelled: (() -> boolean)?): string?
+local function buildSmoothGridBinaryChunked(
+	terrain: Terrain,
+	halfExtentStuds: number,
+	onChunkStep: ((string) -> ())?,
+	isCancelled: (() -> boolean)?,
+	markStep: ((string) -> ())?
+): string?
 	local stepSize = 32
 	local minY, maxY = -64, 64
+
+	if markStep then
+		markStep("Terrain.ReadVoxels probe")
+	end
 
 	local fullRegion = Region3.new(
 		Vector3.new(-halfExtentStuds, minY, -halfExtentStuds),
@@ -147,6 +150,10 @@ local function buildSmoothGridBinaryChunked(terrain: Terrain, halfExtentStuds: n
 	for s = 0, slices - 1 do
 		if isCancelled and isCancelled() then
 			return nil
+		end
+
+		if markStep then
+			markStep(string.format("Terrain slice %d/%d", s + 1, slices))
 		end
 
 		local x0 = originMin.X + (s * stepSize)
@@ -204,9 +211,17 @@ function Serializer.New(ReflectionModule)
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
-		FlushThresholdBytes = 65536, -- Escribe a disco cada ~64 KB para reducir llamadas nativas
+		FlushThresholdBytes = 65536,
 		StreamFile = nil,
+		CheckpointFile = "ZeryuxDump_LastStep.txt",
+		DecompileDisabledForRun = false,
 	}
+
+	function self:RecordStep(detail: string)
+		if typeof(writefile) == "function" and self.CheckpointFile then
+			pcall(writefile, self.CheckpointFile, string.format("Inst: %d | %s", self.ProcessedCount, detail))
+		end
+	end
 
 	function self:GetReferent(instance: Instance): string
 		local existing = self.ReferentMap[instance]
@@ -378,9 +393,11 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:DecompileFast(scriptInstance: Instance, timeoutSec: number): string
-		if typeof(decompile) ~= "function" then
-			return "-- [Sin decompile]"
+		if self.DecompileDisabledForRun or typeof(decompile) ~= "function" then
+			return "-- [Decompile omitido/no disponible]"
 		end
+
+		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance:GetFullName())
 
 		local done = false
 		local outText = "-- [Error decompile]"
@@ -399,16 +416,15 @@ function Serializer.New(ReflectionModule)
 			end
 		end)
 
-		task.delay(limit, function()
-			if not done then
-				done = true
-				pcall(task.cancel, co)
-				outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
-			end
-		end)
+		local t0 = os.clock()
+		while not done and not self.Cancelled and (os.clock() - t0) < limit do
+			task.wait(0.03)
+		end
 
-		while not done and not self.Cancelled do
-			task.wait(0.05)
+		if not done then
+			done = true
+			pcall(task.cancel, co)
+			outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
 		end
 
 		return outText
@@ -422,9 +438,6 @@ function Serializer.New(ReflectionModule)
 			return true
 		end
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
-			return true
-		end
-		if options.SafeUIMode and instance:IsA("LuaSourceContainer") and isInsideGui(instance) then
 			return true
 		end
 		if instance:IsA("Terrain") and not options.SaveTerrain then
@@ -471,7 +484,8 @@ function Serializer.New(ReflectionModule)
 							onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, stepLabel)
 						end
 					end,
-					function() return self.Cancelled end
+					function() return self.Cancelled end,
+					function(stepTag) self:RecordStep(stepTag) end
 				)
 				if gridBin then
 					self:Emit(TypeHandlers.BinaryString("SmoothGrid", gridBin))
@@ -480,6 +494,7 @@ function Serializer.New(ReflectionModule)
 			elseif propName ~= "MaterialColors" then
 				local ok, val = readInstanceProp(instance, propName)
 				if not ok and not skipComplexGui then
+					self:RecordStep("HIDDEN_PROP -> " .. className .. "." .. propName .. " (" .. instance.Name .. ")")
 					ok, val = readHiddenProp(instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
@@ -496,9 +511,12 @@ function Serializer.New(ReflectionModule)
 				self:Emit(TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
-			local attrOk, attrBlob = readHiddenProp(instance, "AttributesSerialize")
-			if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-				self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+			if typeof(gethiddenproperty) == "function" then
+				self:RecordStep("ATTR -> " .. className .. " (" .. instance.Name .. ")")
+				local attrOk, attrBlob = readHiddenProp(instance, "AttributesSerialize")
+				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
+					self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+				end
 			end
 		end
 
@@ -525,6 +543,7 @@ function Serializer.New(ReflectionModule)
 
 				self.ProcessedCount += 1
 				if self.ProcessedCount % yieldEvery == 0 then
+					self:RecordStep("NODE -> " .. inst.ClassName .. ":" .. inst.Name)
 					self:Flush(false)
 					if self.ProcessedCount % 1600 == 0 then
 						pcall(collectgarbage, "step", 128)
@@ -562,6 +581,9 @@ function Serializer.New(ReflectionModule)
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
 		self.Cancelled = false
+		self.DecompileDisabledForRun = false
+
+		self:RecordStep("START RunToFile -> " .. tostring(fileName))
 
 		local canStream = (fileName ~= nil) and (typeof(writefile) == "function") and (typeof(appendfile) == "function")
 		self.StreamFile = canStream and fileName or nil
@@ -592,6 +614,7 @@ function Serializer.New(ReflectionModule)
 		for serviceName, enabled in pairs(options.Services) do
 			if self.Cancelled then break end
 			if enabled then
+				self:RecordStep("SERVICE -> " .. serviceName)
 				local ok, service = pcall(game.GetService, game, serviceName)
 				if ok and service then
 					self:TraverseIterative(service, options, onProgress)
@@ -600,6 +623,7 @@ function Serializer.New(ReflectionModule)
 		end
 
 		if not self.Cancelled and options.IncludeLocalPlayerData and Players.LocalPlayer then
+			self:RecordStep("LOCAL_PLAYER")
 			local lp = Players.LocalPlayer
 			local pGui = lp:FindFirstChildOfClass("PlayerGui")
 			if pGui then
@@ -618,6 +642,7 @@ function Serializer.New(ReflectionModule)
 		end
 
 		if not self.Cancelled and options.NilInstances and typeof(getnilinstances) == "function" then
+			self:RecordStep("NIL_INSTANCES")
 			local nilOk, nilList = pcall(getnilinstances)
 			if nilOk and type(nilList) == "table" then
 				local nilFolderOpen = false
@@ -639,6 +664,7 @@ function Serializer.New(ReflectionModule)
 		end
 
 		self:Emit("</roblox>")
+		self:RecordStep("DONE")
 
 		if canStream and self.StreamFile then
 			self:Flush(true)
