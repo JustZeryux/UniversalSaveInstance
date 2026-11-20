@@ -86,19 +86,25 @@ function PanelUI.Create(onExportCallback)
 	listLayout.Parent = scroll
 
 	-- Estado de opciones
-	local state = {
-		Services = {
-			Workspace = true,
-			ReplicatedStorage = true,
-			Lighting = true,
-			StarterGui = true,
-			StarterPack = true,
-			StarterPlayer = true,
-		},
-		SaveScripts = true,
-		UseDecompiler = true,
-		IgnorePlayers = true,
-	}
+local state = {
+	Services = {
+		Workspace = true,
+		ReplicatedStorage = true,
+		ReplicatedFirst = true,
+		Lighting = true,
+		StarterGui = true,
+		StarterPack = true,
+		StarterPlayer = true,
+		SoundService = true,
+	},
+	SaveScripts = true,
+	UseDecompiler = true,
+	DecompileTimeout = 4,
+	IgnorePlayers = true,
+	NilInstances = true,
+	IncludeLocalPlayerData = true,
+	SaveTagsAndAttributes = true,
+}
 
 	local function addSectionTitle(text)
 		local lbl = Instance.new("TextLabel")
