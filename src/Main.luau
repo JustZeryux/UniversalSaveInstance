@@ -5,38 +5,55 @@ local PanelUI = require(script.PanelUI)
 
 local engine = Serializer.New(Reflection)
 
-PanelUI.Create(
-	function(options, updateStatus)
-		local startTime = os.clock()
-		updateStatus("Iniciando recorrido del DataModel...")
+local function humanSize(bytes: number): string
+	if bytes < 1024 then
+		return string.format("%d B", bytes)
+	elseif bytes < 1024 * 1024 then
+		return string.format("%.1f KB", bytes / 1024)
+	else
+		return string.format("%.2f MB", bytes / (1024 * 1024))
+	end
+end
 
-		local xmlContent = engine:Run(options, function(count, currentName)
-			updateStatus(string.format("Instancias: %d | Actual: %s", count, currentName))
+PanelUI.Create(
+	function(options, updateUI)
+		local startTime = os.clock()
+		updateUI("Calculando instancias...", 0, 1, 0, "workspace/")
+
+		local xmlContent = engine:Run(options, function(count, total, estBytes, currentName)
+			updateUI("Leyendo: " .. tostring(currentName), count, total, estBytes, "workspace/")
 		end)
 
 		local elapsed = os.clock() - startTime
 		if engine.Cancelled then
-			updateStatus(string.format("Cancelado tras %.2fs (%d inst).", elapsed, engine.ProcessedCount))
+			updateUI(string.format("Cancelado (%.1fs)", elapsed), engine.ProcessedCount, engine.TotalEstimate, engine.EstimatedBytes, "workspace/")
 			return
 		end
 
-		local fileName = string.format("Export_%d_%d.rbxlx", game.PlaceId, os.time())
+		local finalBytes = #xmlContent
+		local fileName = string.format("ZeryuxDump_%d_%d.rbxlx", game.PlaceId, os.time())
 
 		if typeof(writefile) == "function" then
-			writefile(fileName, xmlContent)
-			updateStatus(string.format(
-				"OK: %s | %.2fs | %d inst | %d decomp | %d anim | %d nil",
-				fileName, elapsed, engine.ProcessedCount, engine.DecompiledCount, engine.KeyframeSequencesCount, engine.NilCount
-			))
+			local okWrite, writeErr = pcall(writefile, fileName, xmlContent)
+			if okWrite then
+				updateUI(
+					string.format("Guardado (%s | %.1fs | %d decomp)", humanSize(finalBytes), elapsed, engine.DecompiledCount),
+					engine.TotalEstimate,
+					engine.TotalEstimate,
+					finalBytes,
+					"workspace/" .. fileName
+				)
+			else
+				updateUI("Error writefile: " .. tostring(writeErr), engine.ProcessedCount, engine.TotalEstimate, finalBytes, "error")
+			end
 		else
-			warn(string.format(
-				"[ZeryuxDump] %d bytes | %.2fs | %d inst | %d decomp | %d anim | %d nil",
-				#xmlContent, elapsed, engine.ProcessedCount, engine.DecompiledCount, engine.KeyframeSequencesCount, engine.NilCount
-			))
-			updateStatus(string.format(
-				"Memoria: %d bytes (%.2fs | %d inst | %d decomp | %d anim)",
-				#xmlContent, elapsed, engine.ProcessedCount, engine.DecompiledCount, engine.KeyframeSequencesCount
-			))
+			updateUI(
+				string.format("Sin writefile (%s | %.1fs)", humanSize(finalBytes), elapsed),
+				engine.TotalEstimate,
+				engine.TotalEstimate,
+				finalBytes,
+				"memoria"
+			)
 		end
 	end,
 	function()
