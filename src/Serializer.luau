@@ -1,4 +1,4 @@
--- Serializer.luau (Whole Update: filtros por clase/nombre/profundidad, presets, métricas y reporte)
+-- Serializer.luau (Completo: bloqueo anti-crash en scripts conflictivos, filtros, presets, métricas, reporte y streaming rápido)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -111,9 +111,24 @@ local function readPropDirect(inst: Instance, propName: string): (boolean, any)
 	end, inst, propName)
 end
 
+local function normalizeScriptKey(name: string): string
+	return string.lower(name):gsub("[%s_%-]", "")
+end
+
+local BlockedDecompileKeys = {
+	"customkitcreation",
+	"abilitycustomization",
+	"kitcreation",
+}
+
 local function isProblematicDecompileScript(inst: Instance): boolean
-	local nameLower = string.lower(inst.Name)
-	return string.find(nameLower, "custom-kit-creation", 1, true) ~= nil
+	local norm = normalizeScriptKey(inst.Name)
+	for i = 1, #BlockedDecompileKeys do
+		if string.find(norm, BlockedDecompileKeys[i], 1, true) then
+			return true
+		end
+	end
+	return false
 end
 
 local function readBytecodeB64(scriptInstance: Instance): string?
@@ -533,6 +548,7 @@ function Serializer.New(ReflectionModule)
 		local bcB64 = readBytecodeB64(scriptInstance)
 
 		if options.UseDecompiler and not isProblematicDecompileScript(scriptInstance) then
+			self:RecordStep("DECOMPILE_TRY -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
 			local dec = tryDecompileQuick(scriptInstance, options.DecompileTimeout or 0.25)
 			if dec then
 				self.DecompiledCount += 1
