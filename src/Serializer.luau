@@ -1,4 +1,4 @@
--- Serializer.luau (Dos fases: recorre y guarda mapa/UI/Terrain/Nil rápido, y transcribe/decompila scripts al final)
+-- Serializer.luau (Optimizado para velocidad, cero crash en custom-kit-creation y cierre XML limpio)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -16,8 +16,11 @@ end
 
 local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local function toBase64(data: string): string
-	local out = {}
 	local len = #data
+	if len == 0 then return "" end
+	local out = table.create(math.ceil(len / 3) * 4)
+	local idx = 0
+
 	for i = 1, len, 3 do
 		local b1 = string.byte(data, i)
 		local b2 = (i + 1 <= len) and string.byte(data, i + 1) or 0
@@ -34,11 +37,12 @@ local function toBase64(data: string): string
 		local c3 = bit32.extract(triple, 6, 6) + 1
 		local c4 = bit32.extract(triple, 0, 6) + 1
 
-		table.insert(out, string.sub(B64_CHARS, c1, c1))
-		table.insert(out, string.sub(B64_CHARS, c2, c2))
-		table.insert(out, (i + 1 <= len) and string.sub(B64_CHARS, c3, c3) or "=")
-		table.insert(out, (i + 2 <= len) and string.sub(B64_CHARS, c4, c4) or "=")
+		idx += 1; out[idx] = string.sub(B64_CHARS, c1, c1)
+		idx += 1; out[idx] = string.sub(B64_CHARS, c2, c2)
+		idx += 1; out[idx] = (i + 1 <= len) and string.sub(B64_CHARS, c3, c3) or "="
+		idx += 1; out[idx] = (i + 2 <= len) and string.sub(B64_CHARS, c4, c4) or "="
 	end
+
 	return table.concat(out)
 end
 
@@ -100,6 +104,12 @@ local function isInsideGui(inst: Instance): boolean
 	return false
 end
 
+local function readPropDirect(inst: Instance, propName: string): (boolean, any)
+	return pcall(function(o, p)
+		return o[p]
+	end, inst, propName)
+end
+
 local function buildSmoothGridBinaryChunked(
 	terrain: Terrain,
 	halfExtentStuds: number,
@@ -151,13 +161,11 @@ local function buildSmoothGridBinaryChunked(
 
 	local originMin = fullRegion.CFrame.Position - (fullRegion.Size * 0.5)
 	local slices = math.max(1, math.ceil(fullRegion.Size.X / stepSize))
+	local lastYield = os.clock()
 
 	for s = 0, slices - 1 do
 		if isCancelled and isCancelled() then
 			return nil
-		end
-		if markStep then
-			markStep(string.format("Terrain slice %d/%d", s + 1, slices))
 		end
 
 		local x0 = originMin.X + (s * stepSize)
@@ -192,13 +200,24 @@ local function buildSmoothGridBinaryChunked(
 			end
 		end
 
-		if onChunkStep then
-			onChunkStep(string.format("Terrain %d/%d", s + 1, slices))
+		if (os.clock() - lastYield) >= 0.22 or s == slices - 1 then
+			lastYield = os.clock()
+			if onChunkStep then
+				onChunkStep(string.format("Terrain %d/%d", s + 1, slices))
+			end
+			task.wait()
 		end
-		task.wait()
 	end
 
 	return table.concat(bytes)
+end
+
+local function isProblematicDecompileScript(inst: Instance): boolean
+	local nameLower = string.lower(inst.Name)
+	if string.find(nameLower, "custom-kit-creation", 1, true) then
+		return true
+	end
+	return false
 end
 
 function Serializer.New(ReflectionModule)
@@ -215,11 +234,32 @@ function Serializer.New(ReflectionModule)
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
-		FlushThresholdBytes = 131072,
+		FlushThresholdBytes = 524288, -- 512 KB por bloque
 		StreamFile = nil,
 		CheckpointFile = "ZeryuxDump_LastStep.txt",
 		PendingScripts = {},
+		CompiledPropListCache = {},
 	}
+
+	function self:GetCompiledPropList(className: string)
+		local cached = self.CompiledPropListCache[className]
+		if cached ~= nil then
+			return cached or nil
+		end
+		local rawProps = self.Reflection.GetProperties(className)
+		if not rawProps then
+			self.CompiledPropListCache[className] = false
+			return nil
+		end
+		local list = {}
+		for propName, propType in pairs(rawProps) do
+			if propName ~= "MaterialColors" then
+				table.insert(list, { name = propName, propType = propType })
+			end
+		end
+		self.CompiledPropListCache[className] = list
+		return list
+	end
 
 	function self:RecordStep(detail: string)
 		if typeof(writefile) == "function" and self.CheckpointFile then
@@ -341,13 +381,13 @@ function Serializer.New(ReflectionModule)
 		NumberRange = function(name, val)
 			return string.format('<NumberRange name="%s">%s %s </NumberRange>', name, val.Min, val.Max)
 		end,
-	ColorSequence = function(name, val)
-	local parts = {}
-	for _, kp in ipairs(val.Keypoints) do
-		table.insert(parts, string.format("%s %s %s %s 0", kp.Time, kp.Value.R, kp.Value.G, kp.Value.B))
-	end
-	return string.format('<ColorSequence name="%s">%s </ColorSequence>', name, table.concat(parts, " "))
-end,
+		ColorSequence = function(name, val)
+			local parts = {}
+			for _, kp in ipairs(val.Keypoints) do
+				table.insert(parts, string.format("%s %s %s %s 0", kp.Time, kp.Value.R, kp.Value.G, kp.Value.B))
+			end
+			return string.format('<ColorSequence name="%s">%s </ColorSequence>', name, table.concat(parts, " "))
+		end,
 		NumberSequence = function(name, val)
 			local parts = {}
 			for _, kp in ipairs(val.Keypoints) do
@@ -407,19 +447,19 @@ end,
 		return nil
 	end
 
-	function self:TranscribeScriptSource(scriptInstance: Instance, options): string
-		local okSrc, src = pcall(function()
-			return (scriptInstance :: any).Source
-		end)
-		if okSrc and type(src) == "string" and src ~= "" then
-			return src
+	function self:TranscribeScriptEntry(entry, options): string
+		local scriptInstance = entry.inst
+		if not scriptInstance then
+			return "-- [Script no disponible]"
 		end
 
-		local bcB64 = readBytecodeB64(scriptInstance)
+		if type(entry.directSrc) == "string" and entry.directSrc ~= "" then
+			return entry.directSrc
+		end
 
-		if options.UseDecompiler and typeof(decompile) == "function" then
-			self:Flush(true)
-			self:RecordStep("DECOMPILE_PHASE2 -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
+		local bcB64 = entry.bcB64 or readBytecodeB64(scriptInstance)
+
+		if options.UseDecompiler and typeof(decompile) == "function" and not isProblematicDecompileScript(scriptInstance) then
 			local okDec, decRes = pcall(decompile, scriptInstance)
 			if okDec and type(decRes) == "string" and #decRes > 0 then
 				self.DecompiledCount += 1
@@ -427,10 +467,11 @@ end,
 			end
 		end
 
-		if bcB64 then
-			return "-- [Bytecode Base64 sin decompilar]\n-- " .. bcB64
+		if type(bcB64) == "string" and #bcB64 > 0 then
+			return "-- [Bytecode Luau Base64]\n-- " .. bcB64
 		end
-		return "-- [Script sin Source ni bytecode accesible]"
+
+		return "-- [Sin Source ni bytecode accesible]"
 	end
 
 	function self:ShouldSkip(instance: Instance, options): boolean
@@ -452,47 +493,42 @@ end,
 		return false
 	end
 
-	local function getPropValue(inst: Instance, propName: string): (boolean, any)
-		return pcall(function()
-			return (inst :: any)[propName]
-		end)
-	end
-
-	local function getHiddenValue(inst: Instance, propName: string): (boolean, any)
-		if typeof(gethiddenproperty) ~= "function" then
-			return false, nil
-		end
-		return pcall(gethiddenproperty, inst, propName)
-	end
-
 	function self:WriteNodeOpen(instance: Instance, options, onProgress)
 		local className = instance.ClassName
-		local props = self.Reflection.GetProperties(className)
-		if not props then
+		local propList = self:GetCompiledPropList(className)
+		if not propList then
 			return false
 		end
 
 		local ignoreDefaults = (options.IgnoreDefaultProps ~= false)
 		local skipComplexGui = options.SafeUIMode and instance:IsA("GuiObject")
+		local canHidden = (not skipComplexGui) and (typeof(gethiddenproperty) == "function")
 		local ref = self:GetReferent(instance)
+
 		self:Emit(string.format('<Item class="%s" referent="%s">', className, ref))
 		self:Emit("<Properties>")
 
-		for propName, propType in pairs(props) do
+		for i = 1, #propList do
 			if self.Cancelled then break end
+			local pInfo = propList[i]
+			local propName = pInfo.name
+			local propType = pInfo.propType
 
 			if skipComplexGui and (propType == "Rect" or propType == "ColorSequence" or propType == "NumberSequence") then
 				continue
 			end
 
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
-				-- Fase 1: guarda marcador compacto y encola el script para transcribir/decompilar en Fase 2
-				local bcB64 = readBytecodeB64(instance)
+				local okSrc, srcVal = readPropDirect(instance, "Source")
+				local directSrc = (okSrc and type(srcVal) == "string" and srcVal ~= "") and srcVal or nil
+				local bcB64 = directSrc and nil or readBytecodeB64(instance)
+
 				table.insert(self.PendingScripts, {
 					inst = instance,
+					directSrc = directSrc,
 					bcB64 = bcB64,
 				})
-				self:Emit(formatProtectedString("Source", "-- [Pendiente de transcripcion en Fase 2: " .. instance.Name .. "]"))
+				self:Emit(formatProtectedString("Source", "-- [Script en cola Fase 2: " .. instance.Name .. "]"))
 			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
 				local gridBin = buildSmoothGridBinaryChunked(
 					instance :: Terrain,
@@ -510,10 +546,10 @@ end,
 					self:Emit(TypeHandlers.BinaryString("SmoothGrid", gridBin))
 					self:Flush(true)
 				end
-			elseif propName ~= "MaterialColors" then
-				local ok, val = getPropValue(instance, propName)
-				if not ok and not skipComplexGui then
-					ok, val = getHiddenValue(instance, propName)
+			else
+				local ok, val = readPropDirect(instance, propName)
+				if not ok and canHidden then
+					ok, val = pcall(gethiddenproperty, instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
 					if propName == "Name" or not ignoreDefaults or not isDefaultProp(propName, val) then
@@ -529,9 +565,11 @@ end,
 				self:Emit(TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
-			local attrOk, attrBlob = getHiddenValue(instance, "AttributesSerialize")
-			if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-				self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+			if canHidden then
+				local attrOk, attrBlob = pcall(gethiddenproperty, instance, "AttributesSerialize")
+				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
+					self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+				end
 			end
 		end
 
@@ -544,25 +582,29 @@ end,
 			return
 		end
 
-		local stack = { { inst = root, opened = false, hasClosingTag = false } }
+		local stackInst = { root }
+		local stackState = { 0 }
 		local top = 1
-		local yieldEvery = options.YieldEvery or 250
+		local lastYield = os.clock()
+		local sinceGc = 0
 
 		while top > 0 and not self.Cancelled do
-			local entry = stack[top]
-			local inst = entry.inst
+			local inst = stackInst[top]
+			local state = stackState[top]
 
-			if not entry.opened then
-				entry.opened = true
+			if state == 0 then
 				local openedItem = self:WriteNodeOpen(inst, options, onProgress)
-				entry.hasClosingTag = openedItem
+				stackState[top] = openedItem and 1 or 2
 
 				self.ProcessedCount += 1
-				if self.ProcessedCount % yieldEvery == 0 then
-					self:RecordStep("NODE -> " .. inst.ClassName .. ":" .. inst.Name)
+				sinceGc += 1
+
+				if (os.clock() - lastYield) >= 0.22 then
+					lastYield = os.clock()
 					self:Flush(false)
-					if self.ProcessedCount % 2500 == 0 then
-						pcall(collectgarbage, "step", 128)
+					if sinceGc >= 10000 then
+						sinceGc = 0
+						pcall(collectgarbage, "step", 64)
 					end
 					if onProgress then
 						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, inst.Name)
@@ -575,14 +617,16 @@ end,
 					local child = children[i]
 					if not self:ShouldSkip(child, options) then
 						top += 1
-						stack[top] = { inst = child, opened = false, hasClosingTag = false }
+						stackInst[top] = child
+						stackState[top] = 0
 					end
 				end
 			else
-				if entry.hasClosingTag then
+				if state == 1 then
 					self:Emit("</Item>")
 				end
-				stack[top] = nil
+				stackInst[top] = nil
+				stackState[top] = nil
 				top -= 1
 			end
 		end
@@ -681,24 +725,30 @@ end,
 			end
 		end
 
-		-- Fase 2: Transcribir/decompilar scripts acumulados al final sin frenar el recorrido principal
 		if not self.Cancelled and #self.PendingScripts > 0 then
 			self:Flush(true)
+			self:RecordStep("PHASE2_SCRIPTS -> " .. tostring(#self.PendingScripts))
 			self:Emit('<Item class="Folder" referent="RBX_SCRIPTS_TRANSCRIPT"><Properties><string name="Name">ScriptsTranscript</string></Properties>')
-			for idx, entry in ipairs(self.PendingScripts) do
+			local lastScriptYield = os.clock()
+			local totalScripts = #self.PendingScripts
+
+			for idx = 1, totalScripts do
 				if self.Cancelled then break end
+				local entry = self.PendingScripts[idx]
 				local sInst = entry.inst
 				if sInst and sInst.Parent ~= nil then
-					local codeText = self:TranscribeScriptSource(sInst, options)
+					local codeText = self:TranscribeScriptEntry(entry, options)
 					self:Emit(string.format('<Item class="%s" referent="RBX_SCR_%d"><Properties>', sInst.ClassName, idx))
 					self:Emit(TypeHandlers.string("Name", sInst.Name))
 					self:Emit(formatProtectedString("Source", codeText))
 					self:Emit("</Properties></Item>")
 				end
-				if idx % 25 == 0 then
-					self:Flush(true)
+
+				if (os.clock() - lastScriptYield) >= 0.22 or idx == totalScripts then
+					lastScriptYield = os.clock()
+					self:Flush(false)
 					if onProgress then
-						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, "Scripts " .. idx .. "/" .. #self.PendingScripts)
+						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, string.format("Scripts %d/%d", idx, totalScripts))
 					end
 					task.wait()
 				end
