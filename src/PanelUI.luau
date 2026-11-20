@@ -1,7 +1,6 @@
 -- PanelUI.luau
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
-local TweenService = game:GetService("TweenService")
 
 local PanelUI = {}
 
@@ -41,7 +40,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	pcall(function() gui.DisplayOrder = 950 end)
 	gui.Parent = targetParent
 
-	-- Ventana compacta para móvil
 	local main = Instance.new("Frame")
 	main.Name = "MainPanel"
 	main.Size = UDim2.fromOffset(316, 356)
@@ -58,7 +56,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	stroke.Thickness = 1.2
 	stroke.Parent = main
 
-	-- Escala automática si la resolución del teléfono es muy pequeña
 	local uiScale = Instance.new("UIScale")
 	uiScale.Parent = main
 	local function updateScale()
@@ -75,7 +72,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
 	end
 
-	-- Topbar
 	local header = Instance.new("Frame")
 	header.Size = UDim2.new(1, 0, 0, 34)
 	header.BackgroundColor3 = Color3.fromRGB(22, 25, 36)
@@ -135,7 +131,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		gui:Destroy()
 	end)
 
-	-- Pestañas: Filtros | Servicios
 	local tabBar = Instance.new("Frame")
 	tabBar.Size = UDim2.new(1, -16, 0, 26)
 	tabBar.Position = UDim2.fromOffset(8, 6)
@@ -166,7 +161,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	tabServicesBtn.Parent = tabBar
 	Instance.new("UICorner", tabServicesBtn).CornerRadius = UDim.new(0, 5)
 
-	-- Dos listas desplazables separadas para no saturar la pantalla
 	local function makeListFrame()
 		local sf = Instance.new("ScrollingFrame")
 		sf.Size = UDim2.new(1, -16, 1, -136)
@@ -224,17 +218,17 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		},
 		SaveScripts = true,
 		UseDecompiler = true,
-		DecompileTimeout = 3,
+		DecompileTimeout = 1.2,
 		IgnorePlayers = true,
-		SaveTerrain = false, -- Desactivado por defecto en móvil para evitar picos de RAM
+		SaveTerrain = false,
 		TerrainHalfExtent = 128,
-		ConvertAnimationsToKeyframes = true,
+		ConvertAnimationsToKeyframes = false,
 		KeyframeDuration = 0,
 		KeyframeFPS = 30,
-		NilInstances = false, -- Activado opcionalmente para evitar cuelgues en juegos con miles de objetos en nil
+		NilInstances = false,
 		IncludeLocalPlayerData = true,
 		SaveTagsAndAttributes = true,
-		YieldEvery = 35,
+		YieldEvery = 50,
 	}
 
 	local modeBtn = Instance.new("TextButton")
@@ -295,7 +289,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	end
 
 	addToggle(filtersList, "Guardar Scripts", state.SaveScripts, function(v) state.SaveScripts = v end)
-	addToggle(filtersList, "Decompiler (timeout 3s)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
+	addToggle(filtersList, "Decompiler (timeout 1.2s)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
 	addToggle(filtersList, "Ignorar Jugadores", state.IgnorePlayers, function(v) state.IgnorePlayers = v end)
 	addToggle(filtersList, "Animaciones -> Keyframes", state.ConvertAnimationsToKeyframes, function(v) state.ConvertAnimationsToKeyframes = v end)
 	addToggle(filtersList, "Muestrear 2s Anim (30 FPS)", false, function(v) state.KeyframeDuration = v and 2 or 0 end)
@@ -310,7 +304,6 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		end)
 	end
 
-	-- Barra de carga + métricas en tiempo real
 	local progressBg = Instance.new("Frame")
 	progressBg.Size = UDim2.new(1, -16, 0, 10)
 	progressBg.Position = UDim2.new(0, 8, 1, -92)
