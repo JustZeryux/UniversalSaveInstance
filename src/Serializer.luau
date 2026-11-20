@@ -47,8 +47,8 @@ end
 
 local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number): string?
 	local ok, materials, occupancy = pcall(function()
-		local minV = Vector3.new(-halfExtentStuds, -128, -halfExtentStuds)
-		local maxV = Vector3.new(halfExtentStuds, 128, halfExtentStuds)
+		local minV = Vector3.new(-halfExtentStuds, -64, -halfExtentStuds)
+		local maxV = Vector3.new(halfExtentStuds, 64, halfExtentStuds)
 		local region = Region3.new(minV, maxV):ExpandToGrid(4)
 		return terrain:ReadVoxels(region, 4)
 	end)
@@ -64,7 +64,6 @@ local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number):
 		return nil
 	end
 
-	-- Cabecera SmoothGrid en formato XML de Roblox: 4 bytes de dimensiones (X, Y, Z uint32 o int32 simplificado) + 4 bytes/celda
 	local bytes = {}
 	local function pushU32(n: number)
 		local v = math.max(0, math.floor(n))
@@ -95,6 +94,9 @@ local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number):
 				))
 			end
 		end
+		if x % 8 == 0 then
+			task.wait()
+		end
 	end
 
 	return table.concat(bytes)
@@ -106,6 +108,8 @@ function Serializer.New(ReflectionModule)
 		ReferentCount = 0,
 		ReferentMap = {},
 		ProcessedCount = 0,
+		TotalEstimate = 1,
+		EstimatedBytes = 0,
 		DecompiledCount = 0,
 		NilCount = 0,
 		KeyframeSequencesCount = 0,
@@ -230,6 +234,36 @@ function Serializer.New(ReflectionModule)
 		end,
 	}
 
+	local function pushLine(buffer: {string}, serializerSelf, line: string)
+		table.insert(buffer, line)
+		serializerSelf.EstimatedBytes += #line + 1
+	end
+
+	function self:EstimateTotal(options): number
+		local total = 0
+		for serviceName, enabled in pairs(options.Services) do
+			if enabled then
+				local ok, service = pcall(function() return game:GetService(serviceName) end)
+				if ok and service then
+					total += 1 + #service:GetDescendants()
+				end
+			end
+		end
+		if options.IncludeLocalPlayerData and Players.LocalPlayer then
+			local pGui = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+			if pGui then total += #pGui:GetDescendants() end
+			local pScripts = Players.LocalPlayer:FindFirstChild("PlayerScripts")
+			if pScripts then total += #pScripts:GetDescendants() end
+		end
+		if options.NilInstances and typeof(getnilinstances) == "function" then
+			local ok, list = pcall(getnilinstances)
+			if ok and type(list) == "table" then
+				total += #list
+			end
+		end
+		return math.max(1, total)
+	end
+
 	function self:DecompileWithTimeout(scriptInstance: Instance, timeoutSec: number): string
 		local finished = false
 		local result = "-- [Decompile no disponible]"
@@ -255,17 +289,17 @@ function Serializer.New(ReflectionModule)
 			if not finished then
 				finished = true
 				pcall(task.cancel, thread)
-				result = string.format("-- [Timeout %.1fs excedido al descompilar %s]", timeoutSec, scriptInstance.Name)
+				result = string.format("-- [Timeout %.1fs: %s]", timeoutSec, scriptInstance.Name)
 			end
 		end)
 
 		while not finished and not self.Cancelled do
-			task.wait(0.05)
+			task.wait(0.03)
 		end
 
 		if self.Cancelled then
 			pcall(task.cancel, thread)
-			return "-- [Cancelado por el usuario]"
+			return "-- [Cancelado]"
 		end
 
 		return result
@@ -294,18 +328,13 @@ function Serializer.New(ReflectionModule)
 				CFrame = (ok and typeof(jointCFrame) == "CFrame") and jointCFrame or CFrame.identity,
 			})
 		end
-		return {
-			Time = timePos,
-			Poses = poses,
-		}
+		return { Time = timePos, Poses = poses }
 	end
 
 	function self:SerializeGeneratedKeyframeSequence(rig: Instance, buffer: {string}, options)
 		local motors: {Motor6D} = {}
 		self:CollectMotor6Ds(rig, motors)
-		if #motors == 0 then
-			return
-		end
+		if #motors == 0 then return end
 
 		local duration = math.max(0, tonumber(options.KeyframeDuration) or 0)
 		local fps = math.max(1, tonumber(options.KeyframeFPS) or 30)
@@ -325,52 +354,49 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		if #frames == 0 then
-			return
-		end
+		if #frames == 0 then return end
 
 		self.KeyframeSequencesCount += 1
 		local seqRef = self:GetReferent(rig) .. "_KFS"
-		table.insert(buffer, string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
-		table.insert(buffer, "<Properties>")
-		table.insert(buffer, TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
-		table.insert(buffer, TypeHandlers.bool("Loop", true))
-		table.insert(buffer, TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
-		table.insert(buffer, "</Properties>")
+		pushLine(buffer, self, string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
+		pushLine(buffer, self, "<Properties>")
+		pushLine(buffer, self, TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
+		pushLine(buffer, self, TypeHandlers.bool("Loop", true))
+		pushLine(buffer, self, TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
+		pushLine(buffer, self, "</Properties>")
 
 		for idx, frame in ipairs(frames) do
 			local kfRef = string.format("%s_KF%d", seqRef, idx)
-			table.insert(buffer, string.format('<Item class="Keyframe" referent="%s">', kfRef))
-			table.insert(buffer, "<Properties>")
-			table.insert(buffer, TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
-			table.insert(buffer, TypeHandlers.float("Time", frame.Time))
-			table.insert(buffer, "</Properties>")
+			pushLine(buffer, self, string.format('<Item class="Keyframe" referent="%s">', kfRef))
+			pushLine(buffer, self, "<Properties>")
+			pushLine(buffer, self, TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
+			pushLine(buffer, self, TypeHandlers.float("Time", frame.Time))
+			pushLine(buffer, self, "</Properties>")
 
 			for pIdx, pose in ipairs(frame.Poses) do
 				local poseRef = string.format("%s_P%d", kfRef, pIdx)
-				table.insert(buffer, string.format('<Item class="Pose" referent="%s">', poseRef))
-				table.insert(buffer, "<Properties>")
-				table.insert(buffer, TypeHandlers.string("Name", pose.Name))
-				table.insert(buffer, TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
-				table.insert(buffer, TypeHandlers.float("Weight", 1))
-				table.insert(buffer, TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
-				table.insert(buffer, TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
-				table.insert(buffer, "</Properties>")
-				table.insert(buffer, "</Item>")
+				pushLine(buffer, self, string.format('<Item class="Pose" referent="%s">', poseRef))
+				pushLine(buffer, self, "<Properties>")
+				pushLine(buffer, self, TypeHandlers.string("Name", pose.Name))
+				pushLine(buffer, self, TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
+				pushLine(buffer, self, TypeHandlers.float("Weight", 1))
+				pushLine(buffer, self, TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
+				pushLine(buffer, self, TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
+				pushLine(buffer, self, "</Properties>")
+				pushLine(buffer, self, "</Item>")
 			end
 
-			table.insert(buffer, "</Item>")
+			pushLine(buffer, self, "</Item>")
 		end
 
-		table.insert(buffer, "</Item>")
+		pushLine(buffer, self, "</Item>")
 	end
 
 	function self:ShouldSkip(instance: Instance, options): boolean
 		if options.IgnorePlayers and Players:GetPlayerFromCharacter(instance) then
 			return true
 		end
-		if options.Mode == "scripts" and not instance:IsA("LuaSourceContainer") and #instance:GetDescendants() == 0 then
-			-- En modo solo scripts mantenemos contenedores que tengan scripts adentro
+		if options.Mode == "scripts" and not instance:IsA("LuaSourceContainer") then
 			local hasScript = false
 			for _, d in ipairs(instance:GetDescendants()) do
 				if d:IsA("LuaSourceContainer") then
@@ -378,9 +404,7 @@ function Serializer.New(ReflectionModule)
 					break
 				end
 			end
-			if not hasScript then
-				return true
-			end
+			if not hasScript then return true end
 		elseif options.Mode == "map_ui" and instance:IsA("LuaSourceContainer") then
 			return true
 		end
@@ -411,22 +435,22 @@ function Serializer.New(ReflectionModule)
 		end
 
 		local ref = self:GetReferent(instance)
-		table.insert(buffer, string.format('<Item class="%s" referent="%s">', className, ref))
-		table.insert(buffer, "<Properties>")
+		pushLine(buffer, self, string.format('<Item class="%s" referent="%s">', className, ref))
+		pushLine(buffer, self, "<Properties>")
 
 		for propName, propType in pairs(props) do
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
 				local ok, src = pcall(function() return (instance :: any).Source end)
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
-					src = self:DecompileWithTimeout(instance, options.DecompileTimeout or 4)
+					src = self:DecompileWithTimeout(instance, options.DecompileTimeout or 3)
 				end
 				if type(src) == "string" then
-					table.insert(buffer, formatProtectedString("Source", src))
+					pushLine(buffer, self, formatProtectedString("Source", src))
 				end
 			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
-				local gridBin = buildSmoothGridBinary(instance :: Terrain, options.TerrainHalfExtent or 256)
+				local gridBin = buildSmoothGridBinary(instance :: Terrain, options.TerrainHalfExtent or 128)
 				if gridBin then
-					table.insert(buffer, TypeHandlers.BinaryString("SmoothGrid", gridBin))
+					pushLine(buffer, self, TypeHandlers.BinaryString("SmoothGrid", gridBin))
 				end
 			else
 				local ok, val = pcall(function()
@@ -436,7 +460,7 @@ function Serializer.New(ReflectionModule)
 					ok, val = pcall(gethiddenproperty, instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
-					table.insert(buffer, TypeHandlers[propType](propName, val))
+					pushLine(buffer, self, TypeHandlers[propType](propName, val))
 				end
 			end
 		end
@@ -444,24 +468,24 @@ function Serializer.New(ReflectionModule)
 		if options.SaveTagsAndAttributes then
 			local tagsOk, tags = pcall(function() return CollectionService:GetTags(instance) end)
 			if tagsOk and type(tags) == "table" and #tags > 0 then
-				local rawTags = table.concat(tags, "\0")
-				table.insert(buffer, TypeHandlers.BinaryString("Tags", rawTags))
+				pushLine(buffer, self, TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
 			if typeof(gethiddenproperty) == "function" then
 				local attrOk, attrBlob = pcall(gethiddenproperty, instance, "AttributesSerialize")
 				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-					table.insert(buffer, TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+					pushLine(buffer, self, TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
 				end
 			end
 		end
 
-		table.insert(buffer, "</Properties>")
+		pushLine(buffer, self, "</Properties>")
 
 		self.ProcessedCount += 1
-		if self.ProcessedCount % 150 == 0 then
+		local yieldEvery = options.YieldEvery or 35
+		if self.ProcessedCount % yieldEvery == 0 then
 			if onProgress then
-				onProgress(self.ProcessedCount, instance.Name)
+				onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, instance.Name)
 			end
 			task.wait()
 		end
@@ -475,30 +499,29 @@ function Serializer.New(ReflectionModule)
 			self:SerializeGeneratedKeyframeSequence(instance, buffer, options)
 		end
 
-		table.insert(buffer, "</Item>")
+		pushLine(buffer, self, "</Item>")
 	end
 
 	function self:Run(options, onProgress): string
 		self.ReferentCount = 0
 		self.ReferentMap = {}
 		self.ProcessedCount = 0
+		self.EstimatedBytes = 0
 		self.DecompiledCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
 		self.Cancelled = false
+		self.TotalEstimate = self:EstimateTotal(options)
 
-		local buffer = {
-			'<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
-			'<External>null</External>',
-			'<External>nil</External>',
-		}
+		local buffer = {}
+		pushLine(buffer, self, '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">')
+		pushLine(buffer, self, '<External>null</External>')
+		pushLine(buffer, self, '<External>nil</External>')
 
 		for serviceName, enabled in pairs(options.Services) do
 			if self.Cancelled then break end
 			if enabled then
-				local ok, service = pcall(function()
-					return game:GetService(serviceName)
-				end)
+				local ok, service = pcall(function() return game:GetService(serviceName) end)
 				if ok and service then
 					self:SerializeInstance(service, buffer, options, onProgress)
 				end
@@ -531,7 +554,7 @@ function Serializer.New(ReflectionModule)
 					if self.Cancelled then break end
 					if typeof(inst) == "Instance" and inst.Parent == nil and not self:ShouldSkip(inst, options) then
 						if not nilFolderOpen then
-							table.insert(buffer, '<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
+							pushLine(buffer, self, '<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
 							nilFolderOpen = true
 						end
 						self.NilCount += 1
@@ -539,12 +562,12 @@ function Serializer.New(ReflectionModule)
 					end
 				end
 				if nilFolderOpen then
-					table.insert(buffer, "</Item>")
+					pushLine(buffer, self, "</Item>")
 				end
 			end
 		end
 
-		table.insert(buffer, "</roblox>")
+		pushLine(buffer, self, "</roblox>")
 		return table.concat(buffer, "\n")
 	end
 
