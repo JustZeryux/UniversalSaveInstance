@@ -1,4 +1,4 @@
--- Serializer.luau
+-- Serializer.luau (Optimizado para 120k+ instancias, rápido y bajo consumo en móvil)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -45,61 +45,36 @@ local function formatProtectedString(name: string, src: string): string
 	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
 end
 
-local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number): string?
-	local ok, materials, occupancy = pcall(function()
-		local minV = Vector3.new(-halfExtentStuds, -64, -halfExtentStuds)
-		local maxV = Vector3.new(halfExtentStuds, 64, halfExtentStuds)
-		local region = Region3.new(minV, maxV):ExpandToGrid(4)
-		return terrain:ReadVoxels(region, 4)
-	end)
+-- Valores por defecto comunes para reducir tamaño y tiempo en 120k instancias
+local DefaultValues = {
+	Archivable = true,
+	Anchored = false,
+	CanCollide = true,
+	CanTouch = true,
+	CanQuery = true,
+	Massless = false,
+	Transparency = 0,
+	Reflectance = 0,
+	CastShadow = true,
+	BackgroundTransparency = 0,
+	BorderSizePixel = 1,
+	Visible = true,
+	Enabled = true,
+	Disabled = false,
+	LightEmission = 0,
+	LightInfluence = 1,
+	Volume = 0.5,
+	PlaybackSpeed = 1,
+	Looped = false,
+}
 
-	if not ok or not materials or not occupancy then
-		return nil
+local function isDefaultProp(propName: string, val: any): boolean
+	local def = DefaultValues[propName]
+	if def == nil then return false end
+	if typeof(val) == "number" and type(def) == "number" then
+		return math.abs(val - def) < 1e-5
 	end
-
-	local sx = #materials
-	local sy = materials[1] and #materials[1] or 0
-	local sz = (materials[1] and materials[1][1]) and #materials[1][1] or 0
-	if sx == 0 or sy == 0 or sz == 0 then
-		return nil
-	end
-
-	local bytes = {}
-	local function pushU32(n: number)
-		local v = math.max(0, math.floor(n))
-		table.insert(bytes, string.char(
-			bit32.band(v, 0xFF),
-			bit32.band(bit32.rshift(v, 8), 0xFF),
-			bit32.band(bit32.rshift(v, 16), 0xFF),
-			bit32.band(bit32.rshift(v, 24), 0xFF)
-		))
-	end
-
-	pushU32(sx)
-	pushU32(sy)
-	pushU32(sz)
-
-	for x = 1, sx do
-		for y = 1, sy do
-			for z = 1, sz do
-				local mat = materials[x][y][z]
-				local occ = occupancy[x][y][z] or 0
-				local matId = (typeof(mat) == "EnumItem" and mat.Value) or 0
-				local occByte = math.clamp(math.floor(occ * 255 + 0.5), 0, 255)
-				table.insert(bytes, string.char(
-					bit32.band(matId, 0xFF),
-					occByte,
-					0,
-					0
-				))
-			end
-		end
-		if x % 12 == 0 then
-			task.wait()
-		end
-	end
-
-	return table.concat(bytes)
+	return val == def
 end
 
 function Serializer.New(ReflectionModule)
@@ -119,16 +94,19 @@ function Serializer.New(ReflectionModule)
 	}
 
 	function self:GetReferent(instance: Instance): string
-		if not self.ReferentMap[instance] then
-			self.ReferentMap[instance] = "RBX" .. tostring(self.ReferentCount)
-			self.ReferentCount += 1
+		local existing = self.ReferentMap[instance]
+		if existing then
+			return existing
 		end
-		return self.ReferentMap[instance]
+		self.ReferentCount += 1
+		local ref = "RBX" .. tostring(self.ReferentCount)
+		self.ReferentMap[instance] = ref
+		return ref
 	end
 
 	function self:Flush(force: boolean?)
 		if #self.ChunkBuffer == 0 then return end
-		if not force and #self.ChunkBuffer < 120 then return end
+		if not force and #self.ChunkBuffer < 320 then return end
 
 		local chunk = table.concat(self.ChunkBuffer, "\n") .. "\n"
 		table.clear(self.ChunkBuffer)
@@ -141,7 +119,7 @@ function Serializer.New(ReflectionModule)
 	function self:Emit(line: string)
 		table.insert(self.ChunkBuffer, line)
 		self.EstimatedBytes += #line + 1
-		if #self.ChunkBuffer >= 160 then
+		if #self.ChunkBuffer >= 360 then
 			self:Flush(false)
 		end
 	end
@@ -302,7 +280,7 @@ function Serializer.New(ReflectionModule)
 			end
 		end)
 
-		local limit = timeoutSec or 1.2
+		local limit = timeoutSec or 0.9
 		local t0 = os.clock()
 		while not done and not self.Cancelled and (os.clock() - t0) < limit do
 			task.wait(0.01)
@@ -317,110 +295,13 @@ function Serializer.New(ReflectionModule)
 		return outText
 	end
 
-	function self:CollectMotor6Ds(root: Instance, out: {Motor6D})
-		for _, desc in ipairs(root:GetDescendants()) do
-			if desc:IsA("Motor6D") and desc.Part1 then
-				table.insert(out, desc)
-			end
-		end
-	end
-
-	function self:CapturePoseKeyframe(timePos: number, motors: {Motor6D})
-		local poses = {}
-		for _, motor in ipairs(motors) do
-			local ok, jointCFrame = pcall(function()
-				local t = motor.Transform
-				if t ~= CFrame.identity then
-					return t
-				end
-				return motor.C0
-			end)
-			table.insert(poses, {
-				Name = motor.Part1 and motor.Part1.Name or motor.Name,
-				CFrame = (ok and typeof(jointCFrame) == "CFrame") and jointCFrame or CFrame.identity,
-			})
-		end
-		return { Time = timePos, Poses = poses }
-	end
-
-	function self:SerializeGeneratedKeyframeSequence(rig: Instance, options)
-		local motors: {Motor6D} = {}
-		self:CollectMotor6Ds(rig, motors)
-		if #motors == 0 then return end
-
-		local duration = math.max(0, tonumber(options.KeyframeDuration) or 0)
-		local fps = math.max(1, tonumber(options.KeyframeFPS) or 30)
-		local frames = {}
-
-		if duration <= 0 then
-			table.insert(frames, self:CapturePoseKeyframe(0, motors))
-		else
-			local step = 1 / fps
-			local elapsed = 0
-			while elapsed <= duration and not self.Cancelled do
-				table.insert(frames, self:CapturePoseKeyframe(elapsed, motors))
-				elapsed += step
-				if elapsed <= duration and not self.Cancelled then
-					task.wait(step)
-				end
-			end
-		end
-
-		if #frames == 0 then return end
-
-		self.KeyframeSequencesCount += 1
-		local seqRef = self:GetReferent(rig) .. "_KFS"
-		self:Emit(string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
-		self:Emit("<Properties>")
-		self:Emit(TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
-		self:Emit(TypeHandlers.bool("Loop", true))
-		self:Emit(TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
-		self:Emit("</Properties>")
-
-		for idx, frame in ipairs(frames) do
-			local kfRef = string.format("%s_KF%d", seqRef, idx)
-			self:Emit(string.format('<Item class="Keyframe" referent="%s">', kfRef))
-			self:Emit("<Properties>")
-			self:Emit(TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
-			self:Emit(TypeHandlers.float("Time", frame.Time))
-			self:Emit("</Properties>")
-
-			for pIdx, pose in ipairs(frame.Poses) do
-				local poseRef = string.format("%s_P%d", kfRef, pIdx)
-				self:Emit(string.format('<Item class="Pose" referent="%s">', poseRef))
-				self:Emit("<Properties>")
-				self:Emit(TypeHandlers.string("Name", pose.Name))
-				self:Emit(TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
-				self:Emit(TypeHandlers.float("Weight", 1))
-				self:Emit(TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
-				self:Emit(TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
-				self:Emit("</Properties>")
-				self:Emit("</Item>")
-			end
-
-			self:Emit("</Item>")
-		end
-
-		self:Emit("</Item>")
-	end
-
 	function self:ShouldSkip(instance: Instance, options): boolean
 		if options.IgnorePlayers and Players:GetPlayerFromCharacter(instance) then
 			return true
 		end
-		if options.Mode == "scripts" and not instance:IsA("LuaSourceContainer") then
-			local hasScript = false
-			for _, d in ipairs(instance:GetDescendants()) do
-				if d:IsA("LuaSourceContainer") then
-					hasScript = true
-					break
-				end
-			end
-			if not hasScript then return true end
-		elseif options.Mode == "map_ui" and instance:IsA("LuaSourceContainer") then
+		if options.Mode == "map_ui" and instance:IsA("LuaSourceContainer") then
 			return true
 		end
-
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
 			return true
 		end
@@ -430,22 +311,14 @@ function Serializer.New(ReflectionModule)
 		return false
 	end
 
-	function self:SerializeInstance(instance: Instance, options, onProgress)
-		if self.Cancelled or self:ShouldSkip(instance, options) then
-			return
-		end
-
+	function self:WriteNodeOpen(instance: Instance, options)
 		local className = instance.ClassName
 		local props = self.Reflection.GetProperties(className)
-
 		if not props then
-			for _, child in ipairs(instance:GetChildren()) do
-				if self.Cancelled then break end
-				self:SerializeInstance(child, options, onProgress)
-			end
-			return
+			return false
 		end
 
+		local ignoreDefaults = (options.IgnoreDefaultProps ~= false)
 		local ref = self:GetReferent(instance)
 		self:Emit(string.format('<Item class="%s" referent="%s">', className, ref))
 		self:Emit("<Properties>")
@@ -454,17 +327,12 @@ function Serializer.New(ReflectionModule)
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
 				local ok, src = pcall(function() return (instance :: any).Source end)
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
-					src = self:DecompileFast(instance, options.DecompileTimeout or 1.2)
+					src = self:DecompileFast(instance, options.DecompileTimeout or 0.9)
 				end
 				if type(src) == "string" then
 					self:Emit(formatProtectedString("Source", src))
 				end
-			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
-				local gridBin = buildSmoothGridBinary(instance :: Terrain, options.TerrainHalfExtent or 128)
-				if gridBin then
-					self:Emit(TypeHandlers.BinaryString("SmoothGrid", gridBin))
-				end
-			else
+			elseif propName ~= "SmoothGrid" and propName ~= "MaterialColors" then
 				local ok, val = pcall(function()
 					return (instance :: any)[propName]
 				end)
@@ -472,7 +340,9 @@ function Serializer.New(ReflectionModule)
 					ok, val = pcall(gethiddenproperty, instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
-					self:Emit(TypeHandlers[propType](propName, val))
+					if propName == "Name" or not ignoreDefaults or not isDefaultProp(propName, val) then
+						self:Emit(TypeHandlers[propType](propName, val))
+					end
 				end
 			end
 		end
@@ -492,30 +362,54 @@ function Serializer.New(ReflectionModule)
 		end
 
 		self:Emit("</Properties>")
+		return true
+	end
 
-		self.ProcessedCount += 1
-		local yieldEvery = options.YieldEvery or 50
-		if self.ProcessedCount % yieldEvery == 0 then
-			self:Flush(false)
-			if self.ProcessedCount % 400 == 0 then
-				pcall(collectgarbage, "step", 64)
+	-- Recorrido iterativo con pila para evitar recursión profunda en 120k+ instancias
+	function self:TraverseIterative(root: Instance, options, onProgress)
+		if self.Cancelled or self:ShouldSkip(root, options) then
+			return
+		end
+
+		-- Cada entrada en la pila: { inst = Instance, opened = boolean }
+		local stack = { { inst = root, opened = false } }
+		local yieldEvery = options.YieldEvery or 120
+
+		while #stack > 0 and not self.Cancelled do
+			local top = stack[#stack]
+			local inst = top.inst
+
+			if not top.opened then
+				top.opened = true
+				local openedItem = self:WriteNodeOpen(inst, options)
+				top.hasClosingTag = openedItem
+
+				self.ProcessedCount += 1
+				if self.ProcessedCount % yieldEvery == 0 then
+					self:Flush(false)
+					if self.ProcessedCount % 1200 == 0 then
+						pcall(collectgarbage, "step", 128)
+					end
+					if onProgress then
+						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, inst.Name)
+					end
+					task.wait()
+				end
+
+				local children = inst:GetChildren()
+				for i = #children, 1, -1 do
+					local child = children[i]
+					if not self:ShouldSkip(child, options) then
+						table.insert(stack, { inst = child, opened = false, hasClosingTag = false })
+					end
+				end
+			else
+				if top.hasClosingTag then
+					self:Emit("</Item>")
+				end
+				table.remove(stack)
 			end
-			if onProgress then
-				onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, instance.Name)
-			end
-			task.wait()
 		end
-
-		for _, child in ipairs(instance:GetChildren()) do
-			if self.Cancelled then break end
-			self:SerializeInstance(child, options, onProgress)
-		end
-
-		if options.ConvertAnimationsToKeyframes and (instance:FindFirstChildOfClass("Humanoid") or instance:FindFirstChildOfClass("AnimationController")) then
-			self:SerializeGeneratedKeyframeSequence(instance, options)
-		end
-
-		self:Emit("</Item>")
 	end
 
 	function self:RunToFile(fileName: string?, options, onProgress): (boolean, string, number)
@@ -560,7 +454,7 @@ function Serializer.New(ReflectionModule)
 			if enabled then
 				local ok, service = pcall(function() return game:GetService(serviceName) end)
 				if ok and service then
-					self:SerializeInstance(service, options, onProgress)
+					self:TraverseIterative(service, options, onProgress)
 				end
 			end
 		end
@@ -571,14 +465,14 @@ function Serializer.New(ReflectionModule)
 			if pGui then
 				for _, child in ipairs(pGui:GetChildren()) do
 					if self.Cancelled then break end
-					self:SerializeInstance(child, options, onProgress)
+					self:TraverseIterative(child, options, onProgress)
 				end
 			end
 			local pScripts = lp:FindFirstChild("PlayerScripts")
 			if pScripts then
 				for _, child in ipairs(pScripts:GetChildren()) do
 					if self.Cancelled then break end
-					self:SerializeInstance(child, options, onProgress)
+					self:TraverseIterative(child, options, onProgress)
 				end
 			end
 		end
@@ -595,7 +489,7 @@ function Serializer.New(ReflectionModule)
 							nilFolderOpen = true
 						end
 						self.NilCount += 1
-						self:SerializeInstance(inst, options, onProgress)
+						self:TraverseIterative(inst, options, onProgress)
 					end
 				end
 				if nilFolderOpen then
