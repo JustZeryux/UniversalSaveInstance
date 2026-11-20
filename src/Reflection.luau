@@ -38,6 +38,8 @@ local Classes = {
 			WaterWaveSize = "float",
 			WaterWaveSpeed = "float",
 			Decoration = "bool",
+			SmoothGrid = "BinaryString",
+			MaterialColors = "BinaryString",
 		}
 	},
 	Lighting = {
