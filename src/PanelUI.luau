@@ -218,8 +218,9 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		},
 		SaveScripts = true,
 		UseDecompiler = true,
-		DecompileTimeout = 1.2,
+		DecompileTimeout = 0.9,
 		IgnorePlayers = true,
+		SafeUIMode = true,
 		SaveTerrain = false,
 		TerrainHalfExtent = 128,
 		ConvertAnimationsToKeyframes = false,
@@ -228,7 +229,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		NilInstances = false,
 		IncludeLocalPlayerData = true,
 		SaveTagsAndAttributes = true,
-		YieldEvery = 50,
+		YieldEvery = 140,
 	}
 
 	local modeBtn = Instance.new("TextButton")
@@ -288,8 +289,9 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		end)
 	end
 
+	addToggle(filtersList, "UI Ligera (anti-crash UI)", state.SafeUIMode, function(v) state.SafeUIMode = v end)
 	addToggle(filtersList, "Guardar Scripts", state.SaveScripts, function(v) state.SaveScripts = v end)
-	addToggle(filtersList, "Decompiler (timeout 1.2s)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
+	addToggle(filtersList, "Decompiler (timeout 0.9s)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
 	addToggle(filtersList, "Ignorar Jugadores", state.IgnorePlayers, function(v) state.IgnorePlayers = v end)
 	addToggle(filtersList, "Animaciones -> Keyframes", state.ConvertAnimationsToKeyframes, function(v) state.ConvertAnimationsToKeyframes = v end)
 	addToggle(filtersList, "Muestrear 2s Anim (30 FPS)", false, function(v) state.KeyframeDuration = v and 2 or 0 end)
