@@ -94,7 +94,7 @@ local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number):
 				))
 			end
 		end
-		if x % 8 == 0 then
+		if x % 12 == 0 then
 			task.wait()
 		end
 	end
@@ -114,6 +114,8 @@ function Serializer.New(ReflectionModule)
 		NilCount = 0,
 		KeyframeSequencesCount = 0,
 		Cancelled = false,
+		ChunkBuffer = {},
+		StreamFile = nil,
 	}
 
 	function self:GetReferent(instance: Instance): string
@@ -122,6 +124,26 @@ function Serializer.New(ReflectionModule)
 			self.ReferentCount += 1
 		end
 		return self.ReferentMap[instance]
+	end
+
+	function self:Flush(force: boolean?)
+		if #self.ChunkBuffer == 0 then return end
+		if not force and #self.ChunkBuffer < 120 then return end
+
+		local chunk = table.concat(self.ChunkBuffer, "\n") .. "\n"
+		table.clear(self.ChunkBuffer)
+
+		if self.StreamFile and typeof(appendfile) == "function" then
+			pcall(appendfile, self.StreamFile, chunk)
+		end
+	end
+
+	function self:Emit(line: string)
+		table.insert(self.ChunkBuffer, line)
+		self.EstimatedBytes += #line + 1
+		if #self.ChunkBuffer >= 160 then
+			self:Flush(false)
+		end
 	end
 
 	local TypeHandlers = {
@@ -234,11 +256,6 @@ function Serializer.New(ReflectionModule)
 		end,
 	}
 
-	local function pushLine(buffer: {string}, serializerSelf, line: string)
-		table.insert(buffer, line)
-		serializerSelf.EstimatedBytes += #line + 1
-	end
-
 	function self:EstimateTotal(options): number
 		local total = 0
 		for serviceName, enabled in pairs(options.Services) do
@@ -264,45 +281,40 @@ function Serializer.New(ReflectionModule)
 		return math.max(1, total)
 	end
 
-	function self:DecompileWithTimeout(scriptInstance: Instance, timeoutSec: number): string
-		local finished = false
-		local result = "-- [Decompile no disponible]"
-
+	function self:DecompileFast(scriptInstance: Instance, timeoutSec: number): string
 		if typeof(decompile) ~= "function" then
-			return "-- [Funcion decompile() no encontrada en el entorno]"
+			return "-- [Sin decompile]"
 		end
 
-		local thread = task.spawn(function()
-			local ok, output = pcall(decompile, scriptInstance)
-			if not finished then
-				finished = true
-				if ok and type(output) == "string" and #output > 0 then
+		local done = false
+		local outText = "-- [Error decompile]"
+
+		local co = task.spawn(function()
+			local ok, res = pcall(decompile, scriptInstance)
+			if not done then
+				done = true
+				if ok and type(res) == "string" and #res > 0 then
 					self.DecompiledCount += 1
-					result = output
+					outText = res
 				else
-					result = "-- [Error al descompilar: " .. tostring(output) .. "]"
+					outText = "-- [Decompile fallo: " .. tostring(res) .. "]"
 				end
 			end
 		end)
 
-		task.delay(timeoutSec, function()
-			if not finished then
-				finished = true
-				pcall(task.cancel, thread)
-				result = string.format("-- [Timeout %.1fs: %s]", timeoutSec, scriptInstance.Name)
-			end
-		end)
-
-		while not finished and not self.Cancelled do
-			task.wait(0.03)
+		local limit = timeoutSec or 1.2
+		local t0 = os.clock()
+		while not done and not self.Cancelled and (os.clock() - t0) < limit do
+			task.wait(0.01)
 		end
 
-		if self.Cancelled then
-			pcall(task.cancel, thread)
-			return "-- [Cancelado]"
+		if not done then
+			done = true
+			pcall(task.cancel, co)
+			outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
 		end
 
-		return result
+		return outText
 	end
 
 	function self:CollectMotor6Ds(root: Instance, out: {Motor6D})
@@ -331,7 +343,7 @@ function Serializer.New(ReflectionModule)
 		return { Time = timePos, Poses = poses }
 	end
 
-	function self:SerializeGeneratedKeyframeSequence(rig: Instance, buffer: {string}, options)
+	function self:SerializeGeneratedKeyframeSequence(rig: Instance, options)
 		local motors: {Motor6D} = {}
 		self:CollectMotor6Ds(rig, motors)
 		if #motors == 0 then return end
@@ -358,38 +370,38 @@ function Serializer.New(ReflectionModule)
 
 		self.KeyframeSequencesCount += 1
 		local seqRef = self:GetReferent(rig) .. "_KFS"
-		pushLine(buffer, self, string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
-		pushLine(buffer, self, "<Properties>")
-		pushLine(buffer, self, TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
-		pushLine(buffer, self, TypeHandlers.bool("Loop", true))
-		pushLine(buffer, self, TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
-		pushLine(buffer, self, "</Properties>")
+		self:Emit(string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
+		self:Emit("<Properties>")
+		self:Emit(TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
+		self:Emit(TypeHandlers.bool("Loop", true))
+		self:Emit(TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
+		self:Emit("</Properties>")
 
 		for idx, frame in ipairs(frames) do
 			local kfRef = string.format("%s_KF%d", seqRef, idx)
-			pushLine(buffer, self, string.format('<Item class="Keyframe" referent="%s">', kfRef))
-			pushLine(buffer, self, "<Properties>")
-			pushLine(buffer, self, TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
-			pushLine(buffer, self, TypeHandlers.float("Time", frame.Time))
-			pushLine(buffer, self, "</Properties>")
+			self:Emit(string.format('<Item class="Keyframe" referent="%s">', kfRef))
+			self:Emit("<Properties>")
+			self:Emit(TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
+			self:Emit(TypeHandlers.float("Time", frame.Time))
+			self:Emit("</Properties>")
 
 			for pIdx, pose in ipairs(frame.Poses) do
 				local poseRef = string.format("%s_P%d", kfRef, pIdx)
-				pushLine(buffer, self, string.format('<Item class="Pose" referent="%s">', poseRef))
-				pushLine(buffer, self, "<Properties>")
-				pushLine(buffer, self, TypeHandlers.string("Name", pose.Name))
-				pushLine(buffer, self, TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
-				pushLine(buffer, self, TypeHandlers.float("Weight", 1))
-				pushLine(buffer, self, TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
-				pushLine(buffer, self, TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
-				pushLine(buffer, self, "</Properties>")
-				pushLine(buffer, self, "</Item>")
+				self:Emit(string.format('<Item class="Pose" referent="%s">', poseRef))
+				self:Emit("<Properties>")
+				self:Emit(TypeHandlers.string("Name", pose.Name))
+				self:Emit(TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
+				self:Emit(TypeHandlers.float("Weight", 1))
+				self:Emit(TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
+				self:Emit(TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
+				self:Emit("</Properties>")
+				self:Emit("</Item>")
 			end
 
-			pushLine(buffer, self, "</Item>")
+			self:Emit("</Item>")
 		end
 
-		pushLine(buffer, self, "</Item>")
+		self:Emit("</Item>")
 	end
 
 	function self:ShouldSkip(instance: Instance, options): boolean
@@ -418,7 +430,7 @@ function Serializer.New(ReflectionModule)
 		return false
 	end
 
-	function self:SerializeInstance(instance: Instance, buffer: {string}, options, onProgress)
+	function self:SerializeInstance(instance: Instance, options, onProgress)
 		if self.Cancelled or self:ShouldSkip(instance, options) then
 			return
 		end
@@ -429,28 +441,28 @@ function Serializer.New(ReflectionModule)
 		if not props then
 			for _, child in ipairs(instance:GetChildren()) do
 				if self.Cancelled then break end
-				self:SerializeInstance(child, buffer, options, onProgress)
+				self:SerializeInstance(child, options, onProgress)
 			end
 			return
 		end
 
 		local ref = self:GetReferent(instance)
-		pushLine(buffer, self, string.format('<Item class="%s" referent="%s">', className, ref))
-		pushLine(buffer, self, "<Properties>")
+		self:Emit(string.format('<Item class="%s" referent="%s">', className, ref))
+		self:Emit("<Properties>")
 
 		for propName, propType in pairs(props) do
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
 				local ok, src = pcall(function() return (instance :: any).Source end)
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
-					src = self:DecompileWithTimeout(instance, options.DecompileTimeout or 3)
+					src = self:DecompileFast(instance, options.DecompileTimeout or 1.2)
 				end
 				if type(src) == "string" then
-					pushLine(buffer, self, formatProtectedString("Source", src))
+					self:Emit(formatProtectedString("Source", src))
 				end
 			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
 				local gridBin = buildSmoothGridBinary(instance :: Terrain, options.TerrainHalfExtent or 128)
 				if gridBin then
-					pushLine(buffer, self, TypeHandlers.BinaryString("SmoothGrid", gridBin))
+					self:Emit(TypeHandlers.BinaryString("SmoothGrid", gridBin))
 				end
 			else
 				local ok, val = pcall(function()
@@ -460,7 +472,7 @@ function Serializer.New(ReflectionModule)
 					ok, val = pcall(gethiddenproperty, instance, propName)
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
-					pushLine(buffer, self, TypeHandlers[propType](propName, val))
+					self:Emit(TypeHandlers[propType](propName, val))
 				end
 			end
 		end
@@ -468,22 +480,26 @@ function Serializer.New(ReflectionModule)
 		if options.SaveTagsAndAttributes then
 			local tagsOk, tags = pcall(function() return CollectionService:GetTags(instance) end)
 			if tagsOk and type(tags) == "table" and #tags > 0 then
-				pushLine(buffer, self, TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
+				self:Emit(TypeHandlers.BinaryString("Tags", table.concat(tags, "\0")))
 			end
 
 			if typeof(gethiddenproperty) == "function" then
 				local attrOk, attrBlob = pcall(gethiddenproperty, instance, "AttributesSerialize")
 				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
-					pushLine(buffer, self, TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
+					self:Emit(TypeHandlers.BinaryString("AttributesSerialize", attrBlob))
 				end
 			end
 		end
 
-		pushLine(buffer, self, "</Properties>")
+		self:Emit("</Properties>")
 
 		self.ProcessedCount += 1
-		local yieldEvery = options.YieldEvery or 35
+		local yieldEvery = options.YieldEvery or 50
 		if self.ProcessedCount % yieldEvery == 0 then
+			self:Flush(false)
+			if self.ProcessedCount % 400 == 0 then
+				pcall(collectgarbage, "step", 64)
+			end
 			if onProgress then
 				onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, instance.Name)
 			end
@@ -492,38 +508,59 @@ function Serializer.New(ReflectionModule)
 
 		for _, child in ipairs(instance:GetChildren()) do
 			if self.Cancelled then break end
-			self:SerializeInstance(child, buffer, options, onProgress)
+			self:SerializeInstance(child, options, onProgress)
 		end
 
 		if options.ConvertAnimationsToKeyframes and (instance:FindFirstChildOfClass("Humanoid") or instance:FindFirstChildOfClass("AnimationController")) then
-			self:SerializeGeneratedKeyframeSequence(instance, buffer, options)
+			self:SerializeGeneratedKeyframeSequence(instance, options)
 		end
 
-		pushLine(buffer, self, "</Item>")
+		self:Emit("</Item>")
 	end
 
-	function self:Run(options, onProgress): string
+	function self:RunToFile(fileName: string?, options, onProgress): (boolean, string, number)
 		self.ReferentCount = 0
-		self.ReferentMap = {}
+		table.clear(self.ReferentMap)
+		table.clear(self.ChunkBuffer)
 		self.ProcessedCount = 0
 		self.EstimatedBytes = 0
 		self.DecompiledCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
 		self.Cancelled = false
-		self.TotalEstimate = self:EstimateTotal(options)
 
-		local buffer = {}
-		pushLine(buffer, self, '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">')
-		pushLine(buffer, self, '<External>null</External>')
-		pushLine(buffer, self, '<External>nil</External>')
+		local canStream = (fileName ~= nil) and (typeof(writefile) == "function") and (typeof(appendfile) == "function")
+		self.StreamFile = canStream and fileName or nil
+
+		local header = table.concat({
+			'<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+			'<External>null</External>',
+			'<External>nil</External>',
+		}, "\n") .. "\n"
+
+		if self.StreamFile then
+			local okWrite, errWrite = pcall(writefile, self.StreamFile, header)
+			if not okWrite then
+				self.StreamFile = nil
+				canStream = false
+				return false, "Error writefile: " .. tostring(errWrite), 0
+			end
+			self.EstimatedBytes += #header
+		else
+			table.insert(self.ChunkBuffer, '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">')
+			table.insert(self.ChunkBuffer, '<External>null</External>')
+			table.insert(self.ChunkBuffer, '<External>nil</External>')
+			self.EstimatedBytes += #header
+		end
+
+		self.TotalEstimate = self:EstimateTotal(options)
 
 		for serviceName, enabled in pairs(options.Services) do
 			if self.Cancelled then break end
 			if enabled then
 				local ok, service = pcall(function() return game:GetService(serviceName) end)
 				if ok and service then
-					self:SerializeInstance(service, buffer, options, onProgress)
+					self:SerializeInstance(service, options, onProgress)
 				end
 			end
 		end
@@ -534,14 +571,14 @@ function Serializer.New(ReflectionModule)
 			if pGui then
 				for _, child in ipairs(pGui:GetChildren()) do
 					if self.Cancelled then break end
-					self:SerializeInstance(child, buffer, options, onProgress)
+					self:SerializeInstance(child, options, onProgress)
 				end
 			end
 			local pScripts = lp:FindFirstChild("PlayerScripts")
 			if pScripts then
 				for _, child in ipairs(pScripts:GetChildren()) do
 					if self.Cancelled then break end
-					self:SerializeInstance(child, buffer, options, onProgress)
+					self:SerializeInstance(child, options, onProgress)
 				end
 			end
 		end
@@ -554,21 +591,37 @@ function Serializer.New(ReflectionModule)
 					if self.Cancelled then break end
 					if typeof(inst) == "Instance" and inst.Parent == nil and not self:ShouldSkip(inst, options) then
 						if not nilFolderOpen then
-							pushLine(buffer, self, '<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
+							self:Emit('<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
 							nilFolderOpen = true
 						end
 						self.NilCount += 1
-						self:SerializeInstance(inst, buffer, options, onProgress)
+						self:SerializeInstance(inst, options, onProgress)
 					end
 				end
 				if nilFolderOpen then
-					pushLine(buffer, self, "</Item>")
+					self:Emit("</Item>")
 				end
 			end
 		end
 
-		pushLine(buffer, self, "</roblox>")
-		return table.concat(buffer, "\n")
+		self:Emit("</roblox>")
+
+		if canStream and self.StreamFile then
+			self:Flush(true)
+			return true, self.StreamFile, self.EstimatedBytes
+		elseif typeof(writefile) == "function" and fileName then
+			local fullXml = table.concat(self.ChunkBuffer, "\n")
+			table.clear(self.ChunkBuffer)
+			local okW, errW = pcall(writefile, fileName, fullXml)
+			if not okW then
+				return false, "Error writefile: " .. tostring(errW), #fullXml
+			end
+			return true, fileName, #fullXml
+		else
+			local fullXml = table.concat(self.ChunkBuffer, "\n")
+			table.clear(self.ChunkBuffer)
+			return true, "MEMORIA", #fullXml
+		end
 	end
 
 	return self
