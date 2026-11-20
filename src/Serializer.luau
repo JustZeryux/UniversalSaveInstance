@@ -45,6 +45,61 @@ local function formatProtectedString(name: string, src: string): string
 	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
 end
 
+local function buildSmoothGridBinary(terrain: Terrain, halfExtentStuds: number): string?
+	local ok, materials, occupancy = pcall(function()
+		local minV = Vector3.new(-halfExtentStuds, -128, -halfExtentStuds)
+		local maxV = Vector3.new(halfExtentStuds, 128, halfExtentStuds)
+		local region = Region3.new(minV, maxV):ExpandToGrid(4)
+		return terrain:ReadVoxels(region, 4)
+	end)
+
+	if not ok or not materials or not occupancy then
+		return nil
+	end
+
+	local sx = #materials
+	local sy = materials[1] and #materials[1] or 0
+	local sz = (materials[1] and materials[1][1]) and #materials[1][1] or 0
+	if sx == 0 or sy == 0 or sz == 0 then
+		return nil
+	end
+
+	-- Cabecera SmoothGrid en formato XML de Roblox: 4 bytes de dimensiones (X, Y, Z uint32 o int32 simplificado) + 4 bytes/celda
+	local bytes = {}
+	local function pushU32(n: number)
+		local v = math.max(0, math.floor(n))
+		table.insert(bytes, string.char(
+			bit32.band(v, 0xFF),
+			bit32.band(bit32.rshift(v, 8), 0xFF),
+			bit32.band(bit32.rshift(v, 16), 0xFF),
+			bit32.band(bit32.rshift(v, 24), 0xFF)
+		))
+	end
+
+	pushU32(sx)
+	pushU32(sy)
+	pushU32(sz)
+
+	for x = 1, sx do
+		for y = 1, sy do
+			for z = 1, sz do
+				local mat = materials[x][y][z]
+				local occ = occupancy[x][y][z] or 0
+				local matId = (typeof(mat) == "EnumItem" and mat.Value) or 0
+				local occByte = math.clamp(math.floor(occ * 255 + 0.5), 0, 255)
+				table.insert(bytes, string.char(
+					bit32.band(matId, 0xFF),
+					occByte,
+					0,
+					0
+				))
+			end
+		end
+	end
+
+	return table.concat(bytes)
+end
+
 function Serializer.New(ReflectionModule)
 	local self = {
 		Reflection = ReflectionModule,
@@ -53,6 +108,8 @@ function Serializer.New(ReflectionModule)
 		ProcessedCount = 0,
 		DecompiledCount = 0,
 		NilCount = 0,
+		KeyframeSequencesCount = 0,
+		Cancelled = false,
 	}
 
 	function self:GetReferent(instance: Instance): string
@@ -202,8 +259,13 @@ function Serializer.New(ReflectionModule)
 			end
 		end)
 
-		while not finished do
+		while not finished and not self.Cancelled do
 			task.wait(0.05)
+		end
+
+		if self.Cancelled then
+			pcall(task.cancel, thread)
+			return "-- [Cancelado por el usuario]"
 		end
 
 		return result
@@ -254,15 +316,20 @@ function Serializer.New(ReflectionModule)
 		else
 			local step = 1 / fps
 			local elapsed = 0
-			while elapsed <= duration do
+			while elapsed <= duration and not self.Cancelled do
 				table.insert(frames, self:CapturePoseKeyframe(elapsed, motors))
 				elapsed += step
-				if elapsed <= duration then
+				if elapsed <= duration and not self.Cancelled then
 					task.wait(step)
 				end
 			end
 		end
 
+		if #frames == 0 then
+			return
+		end
+
+		self.KeyframeSequencesCount += 1
 		local seqRef = self:GetReferent(rig) .. "_KFS"
 		table.insert(buffer, string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
 		table.insert(buffer, "<Properties>")
@@ -298,55 +365,26 @@ function Serializer.New(ReflectionModule)
 		table.insert(buffer, "</Item>")
 	end
 
-	function self:SerializeTerrainVoxelBackup(terrain: Terrain, buffer: {string})
-		-- Respaldo de voxeles no vacíos mediante ReadVoxels para reconstrucción de referencia
-		local ok, materials, occupancy = pcall(function()
-			local minBound = Vector3.new(-512, -128, -512)
-			local maxBound = Vector3.new(512, 128, 512)
-			local region = Region3.new(minBound, maxBound):ExpandToGrid(4)
-			return terrain:ReadVoxels(region, 4)
-		end)
-
-		if not ok or not materials or not occupancy then
-			return
-		end
-
-		local nonEmpty = {}
-		local sx, sy, sz = #materials, #materials[1] or 0, (#materials[1] and #materials[1][1]) or 0
-		for x = 1, sx do
-			for y = 1, sy do
-				for z = 1, sz do
-					local occ = occupancy[x][y][z]
-					local mat = materials[x][y][z]
-					if occ and occ > 0.01 and mat ~= Enum.Material.Air then
-						table.insert(nonEmpty, string.format("%d,%d,%d:%s:%.2f", x, y, z, mat.Name, occ))
-					end
-				end
-			end
-		end
-
-		if #nonEmpty > 0 then
-			local folderRef = self:GetReferent(terrain) .. "_VOXEL_DUMP"
-			table.insert(buffer, string.format('<Item class="Folder" referent="%s">', folderRef))
-			table.insert(buffer, "<Properties>")
-			table.insert(buffer, TypeHandlers.string("Name", "TerrainVoxelSnapshot"))
-			table.insert(buffer, "</Properties>")
-
-			local valRef = folderRef .. "_DATA"
-			table.insert(buffer, string.format('<Item class="StringValue" referent="%s">', valRef))
-			table.insert(buffer, "<Properties>")
-			table.insert(buffer, TypeHandlers.string("Name", "VoxelCells"))
-			table.insert(buffer, TypeHandlers.string("Value", table.concat(nonEmpty, ";")))
-			table.insert(buffer, "</Properties>")
-			table.insert(buffer, "</Item>")
-			table.insert(buffer, "</Item>")
-		end
-	end
-
 	function self:ShouldSkip(instance: Instance, options): boolean
 		if options.IgnorePlayers and Players:GetPlayerFromCharacter(instance) then
 			return true
 		end
+		if options.Mode == "scripts" and not instance:IsA("LuaSourceContainer") and #instance:GetDescendants() == 0 then
+			-- En modo solo scripts mantenemos contenedores que tengan scripts adentro
+			local hasScript = false
+			for _, d in ipairs(instance:GetDescendants()) do
+				if d:IsA("LuaSourceContainer") then
+					hasScript = true
+					break
+				end
+			end
+			if not hasScript then
+				return true
+			end
+		elseif options.Mode == "map_ui" and instance:IsA("LuaSourceContainer") then
+			return true
+		end
+
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
 			return true
 		end
@@ -357,7 +395,7 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:SerializeInstance(instance: Instance, buffer: {string}, options, onProgress)
-		if self:ShouldSkip(instance, options) then
+		if self.Cancelled or self:ShouldSkip(instance, options) then
 			return
 		end
 
@@ -366,6 +404,7 @@ function Serializer.New(ReflectionModule)
 
 		if not props then
 			for _, child in ipairs(instance:GetChildren()) do
+				if self.Cancelled then break end
 				self:SerializeInstance(child, buffer, options, onProgress)
 			end
 			return
@@ -383,6 +422,11 @@ function Serializer.New(ReflectionModule)
 				end
 				if type(src) == "string" then
 					table.insert(buffer, formatProtectedString("Source", src))
+				end
+			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
+				local gridBin = buildSmoothGridBinary(instance :: Terrain, options.TerrainHalfExtent or 256)
+				if gridBin then
+					table.insert(buffer, TypeHandlers.BinaryString("SmoothGrid", gridBin))
 				end
 			else
 				local ok, val = pcall(function()
@@ -423,11 +467,8 @@ function Serializer.New(ReflectionModule)
 		end
 
 		for _, child in ipairs(instance:GetChildren()) do
+			if self.Cancelled then break end
 			self:SerializeInstance(child, buffer, options, onProgress)
-		end
-
-		if options.SaveTerrain and instance:IsA("Terrain") then
-			self:SerializeTerrainVoxelBackup(instance, buffer)
 		end
 
 		if options.ConvertAnimationsToKeyframes and (instance:FindFirstChildOfClass("Humanoid") or instance:FindFirstChildOfClass("AnimationController")) then
@@ -443,6 +484,8 @@ function Serializer.New(ReflectionModule)
 		self.ProcessedCount = 0
 		self.DecompiledCount = 0
 		self.NilCount = 0
+		self.KeyframeSequencesCount = 0
+		self.Cancelled = false
 
 		local buffer = {
 			'<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
@@ -451,6 +494,7 @@ function Serializer.New(ReflectionModule)
 		}
 
 		for serviceName, enabled in pairs(options.Services) do
+			if self.Cancelled then break end
 			if enabled then
 				local ok, service = pcall(function()
 					return game:GetService(serviceName)
@@ -461,27 +505,30 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		if options.IncludeLocalPlayerData and Players.LocalPlayer then
+		if not self.Cancelled and options.IncludeLocalPlayerData and Players.LocalPlayer then
 			local lp = Players.LocalPlayer
 			local pGui = lp:FindFirstChildOfClass("PlayerGui")
 			if pGui then
 				for _, child in ipairs(pGui:GetChildren()) do
+					if self.Cancelled then break end
 					self:SerializeInstance(child, buffer, options, onProgress)
 				end
 			end
 			local pScripts = lp:FindFirstChild("PlayerScripts")
 			if pScripts then
 				for _, child in ipairs(pScripts:GetChildren()) do
+					if self.Cancelled then break end
 					self:SerializeInstance(child, buffer, options, onProgress)
 				end
 			end
 		end
 
-		if options.NilInstances and typeof(getnilinstances) == "function" then
+		if not self.Cancelled and options.NilInstances and typeof(getnilinstances) == "function" then
 			local nilOk, nilList = pcall(getnilinstances)
 			if nilOk and type(nilList) == "table" then
 				local nilFolderOpen = false
 				for _, inst in ipairs(nilList) do
+					if self.Cancelled then break end
 					if typeof(inst) == "Instance" and inst.Parent == nil and not self:ShouldSkip(inst, options) then
 						if not nilFolderOpen then
 							table.insert(buffer, '<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
