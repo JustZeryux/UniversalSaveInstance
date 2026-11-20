@@ -4,7 +4,6 @@ local CollectionService = game:GetService("CollectionService")
 
 local Serializer = {}
 
--- Codificador Base64 en Luau puro para BinaryString en XML
 local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local function toBase64(data: string): string
 	local out = {}
@@ -42,7 +41,6 @@ local function escapeXml(str: string): string
 end
 
 local function formatProtectedString(name: string, src: string): string
-	-- Evita romper etiquetas CDATA si el código contiene "]]>"
 	local safeCdata = string.gsub(src, "]]>", "]]]]><![CDATA[>")
 	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
 end
@@ -97,6 +95,25 @@ function Serializer.New(ReflectionModule)
 		token = function(name, val)
 			local num = typeof(val) == "EnumItem" and val.Value or tonumber(val) or 0
 			return string.format('<token name="%s">%d</token>', name, num)
+		end,
+		BrickColor = function(name, val)
+			local bc = typeof(val) == "BrickColor" and val or BrickColor.new(tonumber(val) or 194)
+			return string.format('<int name="%s">%d</int>', name, bc.Number)
+		end,
+		PhysicalProperties = function(name, val)
+			if typeof(val) ~= "PhysicalProperties" then
+				return string.format('<PhysicalProperties name="%s"><CustomPhysics>false</CustomPhysics></PhysicalProperties>', name)
+			end
+			return string.format(
+				'<PhysicalProperties name="%s"><CustomPhysics>true</CustomPhysics><Density>%s</Density><Friction>%s</Friction><Elasticity>%s</Elasticity><FrictionWeight>%s</FrictionWeight><ElasticityWeight>%s</ElasticityWeight></PhysicalProperties>',
+				name, val.Density, val.Friction, val.Elasticity, val.FrictionWeight, val.ElasticityWeight
+			)
+		end,
+		Rect = function(name, val)
+			return string.format(
+				'<Rect name="%s"><min><X>%s</X><Y>%s</Y></min><max><X>%s</X><Y>%s</Y></max></Rect>',
+				name, val.Min.X, val.Min.Y, val.Max.X, val.Max.Y
+			)
 		end,
 		Color3 = function(name, val)
 			return string.format('<Color3 name="%s"><R>%s</R><G>%s</G><B>%s</B></Color3>', name, val.R, val.G, val.B)
@@ -192,6 +209,140 @@ function Serializer.New(ReflectionModule)
 		return result
 	end
 
+	function self:CollectMotor6Ds(root: Instance, out: {Motor6D})
+		for _, desc in ipairs(root:GetDescendants()) do
+			if desc:IsA("Motor6D") and desc.Part1 then
+				table.insert(out, desc)
+			end
+		end
+	end
+
+	function self:CapturePoseKeyframe(timePos: number, motors: {Motor6D})
+		local poses = {}
+		for _, motor in ipairs(motors) do
+			local ok, jointCFrame = pcall(function()
+				local t = motor.Transform
+				if t ~= CFrame.identity then
+					return t
+				end
+				return motor.C0
+			end)
+			table.insert(poses, {
+				Name = motor.Part1 and motor.Part1.Name or motor.Name,
+				CFrame = (ok and typeof(jointCFrame) == "CFrame") and jointCFrame or CFrame.identity,
+			})
+		end
+		return {
+			Time = timePos,
+			Poses = poses,
+		}
+	end
+
+	function self:SerializeGeneratedKeyframeSequence(rig: Instance, buffer: {string}, options)
+		local motors: {Motor6D} = {}
+		self:CollectMotor6Ds(rig, motors)
+		if #motors == 0 then
+			return
+		end
+
+		local duration = math.max(0, tonumber(options.KeyframeDuration) or 0)
+		local fps = math.max(1, tonumber(options.KeyframeFPS) or 30)
+		local frames = {}
+
+		if duration <= 0 then
+			table.insert(frames, self:CapturePoseKeyframe(0, motors))
+		else
+			local step = 1 / fps
+			local elapsed = 0
+			while elapsed <= duration do
+				table.insert(frames, self:CapturePoseKeyframe(elapsed, motors))
+				elapsed += step
+				if elapsed <= duration then
+					task.wait(step)
+				end
+			end
+		end
+
+		local seqRef = self:GetReferent(rig) .. "_KFS"
+		table.insert(buffer, string.format('<Item class="KeyframeSequence" referent="%s">', seqRef))
+		table.insert(buffer, "<Properties>")
+		table.insert(buffer, TypeHandlers.string("Name", rig.Name .. "_ExportedKeyframes"))
+		table.insert(buffer, TypeHandlers.bool("Loop", true))
+		table.insert(buffer, TypeHandlers.token("Priority", Enum.AnimationPriority.Action.Value))
+		table.insert(buffer, "</Properties>")
+
+		for idx, frame in ipairs(frames) do
+			local kfRef = string.format("%s_KF%d", seqRef, idx)
+			table.insert(buffer, string.format('<Item class="Keyframe" referent="%s">', kfRef))
+			table.insert(buffer, "<Properties>")
+			table.insert(buffer, TypeHandlers.string("Name", string.format("Keyframe_%.2f", frame.Time)))
+			table.insert(buffer, TypeHandlers.float("Time", frame.Time))
+			table.insert(buffer, "</Properties>")
+
+			for pIdx, pose in ipairs(frame.Poses) do
+				local poseRef = string.format("%s_P%d", kfRef, pIdx)
+				table.insert(buffer, string.format('<Item class="Pose" referent="%s">', poseRef))
+				table.insert(buffer, "<Properties>")
+				table.insert(buffer, TypeHandlers.string("Name", pose.Name))
+				table.insert(buffer, TypeHandlers.CoordinateFrame("CFrame", pose.CFrame))
+				table.insert(buffer, TypeHandlers.float("Weight", 1))
+				table.insert(buffer, TypeHandlers.token("EasingStyle", Enum.PoseEasingStyle.Linear.Value))
+				table.insert(buffer, TypeHandlers.token("EasingDirection", Enum.PoseEasingDirection.InOut.Value))
+				table.insert(buffer, "</Properties>")
+				table.insert(buffer, "</Item>")
+			end
+
+			table.insert(buffer, "</Item>")
+		end
+
+		table.insert(buffer, "</Item>")
+	end
+
+	function self:SerializeTerrainVoxelBackup(terrain: Terrain, buffer: {string})
+		-- Respaldo de voxeles no vacíos mediante ReadVoxels para reconstrucción de referencia
+		local ok, materials, occupancy = pcall(function()
+			local minBound = Vector3.new(-512, -128, -512)
+			local maxBound = Vector3.new(512, 128, 512)
+			local region = Region3.new(minBound, maxBound):ExpandToGrid(4)
+			return terrain:ReadVoxels(region, 4)
+		end)
+
+		if not ok or not materials or not occupancy then
+			return
+		end
+
+		local nonEmpty = {}
+		local sx, sy, sz = #materials, #materials[1] or 0, (#materials[1] and #materials[1][1]) or 0
+		for x = 1, sx do
+			for y = 1, sy do
+				for z = 1, sz do
+					local occ = occupancy[x][y][z]
+					local mat = materials[x][y][z]
+					if occ and occ > 0.01 and mat ~= Enum.Material.Air then
+						table.insert(nonEmpty, string.format("%d,%d,%d:%s:%.2f", x, y, z, mat.Name, occ))
+					end
+				end
+			end
+		end
+
+		if #nonEmpty > 0 then
+			local folderRef = self:GetReferent(terrain) .. "_VOXEL_DUMP"
+			table.insert(buffer, string.format('<Item class="Folder" referent="%s">', folderRef))
+			table.insert(buffer, "<Properties>")
+			table.insert(buffer, TypeHandlers.string("Name", "TerrainVoxelSnapshot"))
+			table.insert(buffer, "</Properties>")
+
+			local valRef = folderRef .. "_DATA"
+			table.insert(buffer, string.format('<Item class="StringValue" referent="%s">', valRef))
+			table.insert(buffer, "<Properties>")
+			table.insert(buffer, TypeHandlers.string("Name", "VoxelCells"))
+			table.insert(buffer, TypeHandlers.string("Value", table.concat(nonEmpty, ";")))
+			table.insert(buffer, "</Properties>")
+			table.insert(buffer, "</Item>")
+			table.insert(buffer, "</Item>")
+		end
+	end
+
 	function self:ShouldSkip(instance: Instance, options): boolean
 		if options.IgnorePlayers and Players:GetPlayerFromCharacter(instance) then
 			return true
@@ -199,7 +350,7 @@ function Serializer.New(ReflectionModule)
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
 			return true
 		end
-		if instance:IsA("Terrain") then
+		if instance:IsA("Terrain") and not options.SaveTerrain then
 			return true
 		end
 		return false
@@ -246,7 +397,6 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		-- Tags de CollectionService si está activado
 		if options.SaveTagsAndAttributes then
 			local tagsOk, tags = pcall(function() return CollectionService:GetTags(instance) end)
 			if tagsOk and type(tags) == "table" and #tags > 0 then
@@ -254,7 +404,6 @@ function Serializer.New(ReflectionModule)
 				table.insert(buffer, TypeHandlers.BinaryString("Tags", rawTags))
 			end
 
-			-- Atributos ocultos si el entorno expone gethiddenproperty
 			if typeof(gethiddenproperty) == "function" then
 				local attrOk, attrBlob = pcall(gethiddenproperty, instance, "AttributesSerialize")
 				if attrOk and type(attrBlob) == "string" and #attrBlob > 0 then
@@ -275,6 +424,14 @@ function Serializer.New(ReflectionModule)
 
 		for _, child in ipairs(instance:GetChildren()) do
 			self:SerializeInstance(child, buffer, options, onProgress)
+		end
+
+		if options.SaveTerrain and instance:IsA("Terrain") then
+			self:SerializeTerrainVoxelBackup(instance, buffer)
+		end
+
+		if options.ConvertAnimationsToKeyframes and (instance:FindFirstChildOfClass("Humanoid") or instance:FindFirstChildOfClass("AnimationController")) then
+			self:SerializeGeneratedKeyframeSequence(instance, buffer, options)
 		end
 
 		table.insert(buffer, "</Item>")
@@ -304,7 +461,6 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		-- Capturar PlayerGui y PlayerScripts del jugador local dentro de StarterGui / StarterPlayerScripts si se pide
 		if options.IncludeLocalPlayerData and Players.LocalPlayer then
 			local lp = Players.LocalPlayer
 			local pGui = lp:FindFirstChildOfClass("PlayerGui")
@@ -321,7 +477,6 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		-- Capturar instancias en nil si el entorno ofrece getnilinstances()
 		if options.NilInstances and typeof(getnilinstances) == "function" then
 			local nilOk, nilList = pcall(getnilinstances)
 			if nilOk and type(nilList) == "table" then
