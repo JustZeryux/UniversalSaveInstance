@@ -1,4 +1,4 @@
--- Serializer.luau (Optimizado para evitar crash en decompile y reducir lag en 120k+ instancias)
+-- Serializer.luau (Dos fases: recorre y guarda mapa/UI/Terrain/Nil rápido, y transcribe/decompila scripts al final)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -215,11 +215,10 @@ function Serializer.New(ReflectionModule)
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
-		FlushThresholdBytes = 131072, -- 128 KB por bloque para menos llamadas a disco y más velocidad
+		FlushThresholdBytes = 131072,
 		StreamFile = nil,
 		CheckpointFile = "ZeryuxDump_LastStep.txt",
-		DecompileFailures = 0,
-		MaxDecompileFailures = 3,
+		PendingScripts = {},
 	}
 
 	function self:RecordStep(detail: string)
@@ -397,25 +396,41 @@ function Serializer.New(ReflectionModule)
 		return math.max(1, total)
 	end
 
-	function self:DecompileFast(scriptInstance: Instance, timeoutSec: number): string
-		if typeof(decompile) ~= "function" then
-			return "-- [Sin decompile]"
+	local function readBytecodeB64(scriptInstance: Instance): string?
+		if typeof(getscriptbytecode) ~= "function" then
+			return nil
 		end
-		if self.DecompileFailures >= self.MaxDecompileFailures then
-			return "-- [Decompile desactivado tras fallos]"
+		local ok, bc = pcall(getscriptbytecode, scriptInstance)
+		if ok and type(bc) == "string" and #bc > 0 then
+			return toBase64(bc)
+		end
+		return nil
+	end
+
+	function self:TranscribeScriptSource(scriptInstance: Instance, options): string
+		local okSrc, src = pcall(function()
+			return (scriptInstance :: any).Source
+		end)
+		if okSrc and type(src) == "string" and src ~= "" then
+			return src
 		end
 
-		self:Flush(true)
-		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
+		local bcB64 = readBytecodeB64(scriptInstance)
 
-		local ok, res = pcall(decompile, scriptInstance)
-		if ok and type(res) == "string" and #res > 0 then
-			self.DecompiledCount += 1
-			return res
+		if options.UseDecompiler and typeof(decompile) == "function" then
+			self:Flush(true)
+			self:RecordStep("DECOMPILE_PHASE2 -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
+			local okDec, decRes = pcall(decompile, scriptInstance)
+			if okDec and type(decRes) == "string" and #decRes > 0 then
+				self.DecompiledCount += 1
+				return decRes
+			end
 		end
 
-		self.DecompileFailures += 1
-		return "-- [Decompile omitido/fallo: " .. tostring(res) .. "]"
+		if bcB64 then
+			return "-- [Bytecode Base64 sin decompilar]\n-- " .. bcB64
+		end
+		return "-- [Script sin Source ni bytecode accesible]"
 	end
 
 	function self:ShouldSkip(instance: Instance, options): boolean
@@ -471,13 +486,13 @@ function Serializer.New(ReflectionModule)
 			end
 
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
-				local ok, src = getPropValue(instance, "Source")
-				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
-					src = self:DecompileFast(instance, options.DecompileTimeout or 0.9)
-				end
-				if type(src) == "string" then
-					self:Emit(formatProtectedString("Source", src))
-				end
+				-- Fase 1: guarda marcador compacto y encola el script para transcribir/decompilar en Fase 2
+				local bcB64 = readBytecodeB64(instance)
+				table.insert(self.PendingScripts, {
+					inst = instance,
+					bcB64 = bcB64,
+				})
+				self:Emit(formatProtectedString("Source", "-- [Pendiente de transcripcion en Fase 2: " .. instance.Name .. "]"))
 			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
 				local gridBin = buildSmoothGridBinaryChunked(
 					instance :: Terrain,
@@ -544,6 +559,7 @@ function Serializer.New(ReflectionModule)
 
 				self.ProcessedCount += 1
 				if self.ProcessedCount % yieldEvery == 0 then
+					self:RecordStep("NODE -> " .. inst.ClassName .. ":" .. inst.Name)
 					self:Flush(false)
 					if self.ProcessedCount % 2500 == 0 then
 						pcall(collectgarbage, "step", 128)
@@ -576,13 +592,13 @@ function Serializer.New(ReflectionModule)
 		self.ReferentCount = 0
 		clearTable(self.ReferentMap)
 		clearTable(self.ChunkBuffer)
+		clearTable(self.PendingScripts)
 		self.PendingChunkBytes = 0
 		self.ProcessedCount = 0
 		self.EstimatedBytes = 0
 		self.DecompiledCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
-		self.DecompileFailures = 0
 		self.Cancelled = false
 
 		self:RecordStep("START -> " .. tostring(fileName))
@@ -663,6 +679,32 @@ function Serializer.New(ReflectionModule)
 					self:Emit("</Item>")
 				end
 			end
+		end
+
+		-- Fase 2: Transcribir/decompilar scripts acumulados al final sin frenar el recorrido principal
+		if not self.Cancelled and #self.PendingScripts > 0 then
+			self:Flush(true)
+			self:Emit('<Item class="Folder" referent="RBX_SCRIPTS_TRANSCRIPT"><Properties><string name="Name">ScriptsTranscript</string></Properties>')
+			for idx, entry in ipairs(self.PendingScripts) do
+				if self.Cancelled then break end
+				local sInst = entry.inst
+				if sInst and sInst.Parent ~= nil then
+					local codeText = self:TranscribeScriptSource(sInst, options)
+					self:Emit(string.format('<Item class="%s" referent="RBX_SCR_%d"><Properties>', sInst.ClassName, idx))
+					self:Emit(TypeHandlers.string("Name", sInst.Name))
+					self:Emit(formatProtectedString("Source", codeText))
+					self:Emit("</Properties></Item>")
+				end
+				if idx % 25 == 0 then
+					self:Flush(true)
+					if onProgress then
+						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, "Scripts " .. idx .. "/" .. #self.PendingScripts)
+					end
+					task.wait()
+				end
+			end
+			self:Emit("</Item>")
+			self:Flush(true)
 		end
 
 		self:Emit("</roblox>")
