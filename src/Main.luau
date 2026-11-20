@@ -20,7 +20,8 @@ PanelUI.Create(
 		local startTime = os.clock()
 		updateUI("Calculando instancias...", 0, 1, 0, "workspace/")
 
-		local xmlContent = engine:Run(options, function(count, total, estBytes, currentName)
+		local fileName = string.format("ZeryuxDump_%d_%d.rbxlx", game.PlaceId, os.time())
+		local ok, resultInfo, finalBytes = engine:RunToFile(fileName, options, function(count, total, estBytes, currentName)
 			updateUI("Leyendo: " .. tostring(currentName), count, total, estBytes, "workspace/")
 		end)
 
@@ -30,30 +31,16 @@ PanelUI.Create(
 			return
 		end
 
-		local finalBytes = #xmlContent
-		local fileName = string.format("ZeryuxDump_%d_%d.rbxlx", game.PlaceId, os.time())
-
-		if typeof(writefile) == "function" then
-			local okWrite, writeErr = pcall(writefile, fileName, xmlContent)
-			if okWrite then
-				updateUI(
-					string.format("Guardado (%s | %.1fs | %d decomp)", humanSize(finalBytes), elapsed, engine.DecompiledCount),
-					engine.TotalEstimate,
-					engine.TotalEstimate,
-					finalBytes,
-					"workspace/" .. fileName
-				)
-			else
-				updateUI("Error writefile: " .. tostring(writeErr), engine.ProcessedCount, engine.TotalEstimate, finalBytes, "error")
-			end
-		else
+		if ok then
 			updateUI(
-				string.format("Sin writefile (%s | %.1fs)", humanSize(finalBytes), elapsed),
+				string.format("Listo (%s | %.1fs | %d decomp)", humanSize(finalBytes), elapsed, engine.DecompiledCount),
 				engine.TotalEstimate,
 				engine.TotalEstimate,
 				finalBytes,
-				"memoria"
+				"workspace/" .. tostring(resultInfo)
 			)
+		else
+			updateUI(tostring(resultInfo), engine.ProcessedCount, engine.TotalEstimate, finalBytes, "error")
 		end
 	end,
 	function()
