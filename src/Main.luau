@@ -10,7 +10,7 @@ PanelUI.Create(function(options, updateStatus)
 	updateStatus("Iniciando recorrido del DataModel...")
 
 	local xmlContent = engine:Run(options, function(count, currentName)
-		updateStatus(string.format("Procesando: %d instancias (%s)", count, currentName))
+		updateStatus(string.format("Procesando: %d inst. (%s)", count, currentName))
 	end)
 
 	local elapsed = os.clock() - startTime
@@ -18,10 +18,18 @@ PanelUI.Create(function(options, updateStatus)
 
 	if typeof(writefile) == "function" then
 		writefile(fileName, xmlContent)
-		updateStatus(string.format("Guardado: %s (%.2fs | %d inst.)", fileName, elapsed, engine.ProcessedCount))
+		updateStatus(string.format(
+			"Listo: %s (%.2fs | %d inst | %d decomp | %d nil)",
+			fileName, elapsed, engine.ProcessedCount, engine.DecompiledCount, engine.NilCount
+		))
 	else
-		-- Respaldo para pruebas dentro de Roblox Studio
-		warn("[CustomSaveInstance] XML generado (" .. #xmlContent .. " bytes) en " .. string.format("%.2fs", elapsed))
-		updateStatus(string.format("Generado en memoria: %d bytes (%.2fs)", #xmlContent, elapsed))
+		warn(string.format(
+			"[CustomSaveInstance] %d bytes | %.2fs | %d inst | %d decomp | %d nil",
+			#xmlContent, elapsed, engine.ProcessedCount, engine.DecompiledCount, engine.NilCount
+		))
+		updateStatus(string.format(
+			"Memoria: %d bytes (%.2fs | %d inst | %d decomp)",
+			#xmlContent, elapsed, engine.ProcessedCount, engine.DecompiledCount
+		))
 	end
 end)
