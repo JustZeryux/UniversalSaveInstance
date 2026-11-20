@@ -1,4 +1,4 @@
--- Serializer.luau (Optimizado para 120k+ instancias, rápido y bajo consumo en móvil)
+-- Serializer.luau (Completo: Terrain por franjas, streaming por disco, IgnoreDefaultProps y recorrido iterativo)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -45,7 +45,6 @@ local function formatProtectedString(name: string, src: string): string
 	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
 end
 
--- Valores por defecto comunes para reducir tamaño y tiempo en 120k instancias
 local DefaultValues = {
 	Archivable = true,
 	Anchored = false,
@@ -75,6 +74,96 @@ local function isDefaultProp(propName: string, val: any): boolean
 		return math.abs(val - def) < 1e-5
 	end
 	return val == def
+end
+
+local function buildSmoothGridBinaryChunked(terrain: Terrain, halfExtentStuds: number, onChunkStep: ((string) -> ())?, isCancelled: (() -> boolean)?): string?
+	local stepSize = 32
+	local minY, maxY = -64, 64
+
+	local fullRegion = Region3.new(
+		Vector3.new(-halfExtentStuds, minY, -halfExtentStuds),
+		Vector3.new(halfExtentStuds, maxY, halfExtentStuds)
+	):ExpandToGrid(4)
+
+	local testOk, testMat, testOcc = pcall(function()
+		local probeMin = fullRegion.CFrame.Position - fullRegion.Size * 0.5
+		local probeMax = probeMin + Vector3.new(4, fullRegion.Size.Y, fullRegion.Size.Z)
+		return terrain:ReadVoxels(Region3.new(probeMin, probeMax):ExpandToGrid(4), 4)
+	end)
+
+	if not testOk or not testMat or not testOcc then
+		return nil
+	end
+
+	local sy = #testMat[1] or 0
+	local sz = (testMat[1] and testMat[1][1]) and #testMat[1][1] or 0
+	local sx = math.max(1, math.floor(fullRegion.Size.X / 4))
+	if sy == 0 or sz == 0 then
+		return nil
+	end
+
+	local bytes = {}
+	local function pushU32(n: number)
+		local v = math.max(0, math.floor(n))
+		table.insert(bytes, string.char(
+			bit32.band(v, 0xFF),
+			bit32.band(bit32.rshift(v, 8), 0xFF),
+			bit32.band(bit32.rshift(v, 16), 0xFF),
+			bit32.band(bit32.rshift(v, 24), 0xFF)
+		))
+	end
+
+	pushU32(sx)
+	pushU32(sy)
+	pushU32(sz)
+
+	local originMin = fullRegion.CFrame.Position - (fullRegion.Size * 0.5)
+	local slices = math.max(1, math.ceil(fullRegion.Size.X / stepSize))
+
+	for s = 0, slices - 1 do
+		if isCancelled and isCancelled() then
+			return nil
+		end
+
+		local x0 = originMin.X + (s * stepSize)
+		local x1 = math.min(originMin.X + fullRegion.Size.X, x0 + stepSize)
+		if x1 > x0 then
+			local sliceRegion = Region3.new(
+				Vector3.new(x0, originMin.Y, originMin.Z),
+				Vector3.new(x1, originMin.Y + fullRegion.Size.Y, originMin.Z + fullRegion.Size.Z)
+			):ExpandToGrid(4)
+
+			local okSlice, matSlice, occSlice = pcall(function()
+				return terrain:ReadVoxels(sliceRegion, 4)
+			end)
+
+			if okSlice and matSlice and occSlice then
+				for x = 1, #matSlice do
+					for y = 1, #matSlice[x] do
+						for z = 1, #matSlice[x][y] do
+							local mat = matSlice[x][y][z]
+							local occ = occSlice[x][y][z] or 0
+							local matId = (typeof(mat) == "EnumItem" and mat.Value) or 0
+							local occByte = math.clamp(math.floor(occ * 255 + 0.5), 0, 255)
+							table.insert(bytes, string.char(
+								bit32.band(matId, 0xFF),
+								occByte,
+								0,
+								0
+							))
+						end
+					end
+				end
+			end
+		end
+
+		if onChunkStep then
+			onChunkStep(string.format("Terrain %d/%d", s + 1, slices))
+		end
+		task.wait()
+	end
+
+	return table.concat(bytes)
 end
 
 function Serializer.New(ReflectionModule)
@@ -311,7 +400,7 @@ function Serializer.New(ReflectionModule)
 		return false
 	end
 
-	function self:WriteNodeOpen(instance: Instance, options)
+	function self:WriteNodeOpen(instance: Instance, options, onProgress)
 		local className = instance.ClassName
 		local props = self.Reflection.GetProperties(className)
 		if not props then
@@ -324,6 +413,8 @@ function Serializer.New(ReflectionModule)
 		self:Emit("<Properties>")
 
 		for propName, propType in pairs(props) do
+			if self.Cancelled then break end
+
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
 				local ok, src = pcall(function() return (instance :: any).Source end)
 				if (not ok or type(src) ~= "string" or src == "") and options.UseDecompiler then
@@ -332,7 +423,23 @@ function Serializer.New(ReflectionModule)
 				if type(src) == "string" then
 					self:Emit(formatProtectedString("Source", src))
 				end
-			elseif propName ~= "SmoothGrid" and propName ~= "MaterialColors" then
+			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
+				local gridBin = buildSmoothGridBinaryChunked(
+					instance :: Terrain,
+					options.TerrainHalfExtent or 128,
+					function(stepLabel)
+						self:Flush(true)
+						if onProgress then
+							onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, stepLabel)
+						end
+					end,
+					function() return self.Cancelled end
+				)
+				if gridBin then
+					self:Emit(TypeHandlers.BinaryString("SmoothGrid", gridBin))
+					self:Flush(true)
+				end
+			elseif propName ~= "MaterialColors" then
 				local ok, val = pcall(function()
 					return (instance :: any)[propName]
 				end)
@@ -365,14 +472,12 @@ function Serializer.New(ReflectionModule)
 		return true
 	end
 
-	-- Recorrido iterativo con pila para evitar recursión profunda en 120k+ instancias
 	function self:TraverseIterative(root: Instance, options, onProgress)
 		if self.Cancelled or self:ShouldSkip(root, options) then
 			return
 		end
 
-		-- Cada entrada en la pila: { inst = Instance, opened = boolean }
-		local stack = { { inst = root, opened = false } }
+		local stack = { { inst = root, opened = false, hasClosingTag = false } }
 		local yieldEvery = options.YieldEvery or 120
 
 		while #stack > 0 and not self.Cancelled do
@@ -381,7 +486,7 @@ function Serializer.New(ReflectionModule)
 
 			if not top.opened then
 				top.opened = true
-				local openedItem = self:WriteNodeOpen(inst, options)
+				local openedItem = self:WriteNodeOpen(inst, options, onProgress)
 				top.hasClosingTag = openedItem
 
 				self.ProcessedCount += 1
