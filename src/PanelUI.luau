@@ -5,7 +5,6 @@ local CoreGui = game:GetService("CoreGui")
 local PanelUI = {}
 
 function PanelUI.Create(onExportCallback)
-	-- Eliminar instancia previa si se re-ejecuta
 	local targetParent = pcall(function() return CoreGui.Name end) and CoreGui or Players.LocalPlayer:WaitForChild("PlayerGui")
 	local existing = targetParent:FindFirstChild("ZeryuxSaveInstanceUI")
 	if existing then existing:Destroy() end
@@ -15,42 +14,34 @@ function PanelUI.Create(onExportCallback)
 	screenGui.ResetOnSpawn = false
 	screenGui.Parent = targetParent
 
-	-- Ventana Principal
 	local main = Instance.new("Frame")
 	main.Name = "MainFrame"
-	main.Size = UDim2.fromOffset(340, 440)
-	main.Position = UDim2.new(0.5, -170, 0.5, -220)
+	main.Size = UDim2.fromOffset(360, 480)
+	main.Position = UDim2.new(0.5, -180, 0.5, -240)
 	main.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
 	main.BorderSizePixel = 0
 	main.Active = true
 	main.Draggable = true
 	main.Parent = screenGui
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 10)
-	corner.Parent = main
-
+	Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = Color3.fromRGB(0, 230, 255)
 	stroke.Thickness = 1.5
 	stroke.Parent = main
 
-	-- Header
 	local header = Instance.new("Frame")
 	header.Size = UDim2.new(1, 0, 0, 38)
 	header.BackgroundColor3 = Color3.fromRGB(24, 28, 40)
 	header.BorderSizePixel = 0
 	header.Parent = main
-
-	local headerCorner = Instance.new("UICorner")
-	headerCorner.CornerRadius = UDim.new(0, 10)
-	headerCorner.Parent = header
+	Instance.new("UICorner", header).CornerRadius = UDim.new(0, 10)
 
 	local title = Instance.new("TextLabel")
 	title.Size = UDim2.new(1, -40, 1, 0)
 	title.Position = UDim2.fromOffset(12, 0)
 	title.BackgroundTransparency = 1
-	title.Text = "CUSTOM SAVEINSTANCE // V1.0"
+	title.Text = "CUSTOM SAVEINSTANCE // FULL"
 	title.TextColor3 = Color3.fromRGB(0, 230, 255)
 	title.Font = Enum.Font.GothamBold
 	title.TextSize = 14
@@ -71,40 +62,43 @@ function PanelUI.Create(onExportCallback)
 		screenGui:Destroy()
 	end)
 
-	-- Contenedor con Scroll para Opciones y Servicios
 	local scroll = Instance.new("ScrollingFrame")
 	scroll.Size = UDim2.new(1, -24, 1, -130)
 	scroll.Position = UDim2.fromOffset(12, 48)
 	scroll.BackgroundTransparency = 1
 	scroll.ScrollBarThickness = 4
 	scroll.ScrollBarImageColor3 = Color3.fromRGB(0, 230, 255)
-	scroll.CanvasSize = UDim2.fromOffset(0, 420)
+	scroll.CanvasSize = UDim2.fromOffset(0, 560)
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	scroll.Parent = main
 
 	local listLayout = Instance.new("UIListLayout")
 	listLayout.Padding = UDim.new(0, 6)
 	listLayout.Parent = scroll
 
-	-- Estado de opciones
-local state = {
-	Services = {
-		Workspace = true,
-		ReplicatedStorage = true,
-		ReplicatedFirst = true,
-		Lighting = true,
-		StarterGui = true,
-		StarterPack = true,
-		StarterPlayer = true,
-		SoundService = true,
-	},
-	SaveScripts = true,
-	UseDecompiler = true,
-	DecompileTimeout = 4,
-	IgnorePlayers = true,
-	NilInstances = true,
-	IncludeLocalPlayerData = true,
-	SaveTagsAndAttributes = true,
-}
+	local state = {
+		Services = {
+			Workspace = true,
+			ReplicatedStorage = true,
+			ReplicatedFirst = true,
+			Lighting = true,
+			StarterGui = true,
+			StarterPack = true,
+			StarterPlayer = true,
+			SoundService = true,
+		},
+		SaveScripts = true,
+		UseDecompiler = true,
+		DecompileTimeout = 4,
+		IgnorePlayers = true,
+		SaveTerrain = true,
+		ConvertAnimationsToKeyframes = true,
+		KeyframeDuration = 0,
+		KeyframeFPS = 30,
+		NilInstances = true,
+		IncludeLocalPlayerData = true,
+		SaveTagsAndAttributes = true,
+	}
 
 	local function addSectionTitle(text)
 		local lbl = Instance.new("TextLabel")
@@ -134,7 +128,7 @@ local state = {
 		lbl.Text = labelText
 		lbl.TextColor3 = Color3.fromRGB(235, 240, 250)
 		lbl.Font = Enum.Font.Gotham
-		lbl.TextSize = 13
+		lbl.TextSize = 12
 		lbl.TextXAlignment = Enum.TextXAlignment.Left
 		lbl.Parent = row
 
@@ -153,10 +147,16 @@ local state = {
 		end)
 	end
 
-	addSectionTitle("FILTROS GENERALES")
+	addSectionTitle("FILTROS Y EXTRACCION")
 	addToggle("Guardar Scripts (Local / Module)", state.SaveScripts, function(v) state.SaveScripts = v end)
-	addToggle("Usar Decompiler (si existe)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
+	addToggle("Usar Decompiler (con timeout)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
 	addToggle("Ignorar Personajes de Jugadores", state.IgnorePlayers, function(v) state.IgnorePlayers = v end)
+	addToggle("Incluir Terrain y Voxel Snapshot", state.SaveTerrain, function(v) state.SaveTerrain = v end)
+	addToggle("Animaciones -> KeyframeSequence", state.ConvertAnimationsToKeyframes, function(v) state.ConvertAnimationsToKeyframes = v end)
+	addToggle("Muestrear 2s de Animacion (30 FPS)", false, function(v) state.KeyframeDuration = v and 2 or 0 end)
+	addToggle("Capturar NilInstances", state.NilInstances, function(v) state.NilInstances = v end)
+	addToggle("Incluir PlayerGui y PlayerScripts", state.IncludeLocalPlayerData, function(v) state.IncludeLocalPlayerData = v end)
+	addToggle("Guardar Tags y Atributos", state.SaveTagsAndAttributes, function(v) state.SaveTagsAndAttributes = v end)
 
 	addSectionTitle("SERVICIOS A EXPORTAR")
 	for serviceName, defaultVal in pairs(state.Services) do
@@ -165,7 +165,6 @@ local state = {
 		end)
 	end
 
-	-- Barra de estado
 	local statusLabel = Instance.new("TextLabel")
 	statusLabel.Size = UDim2.new(1, -24, 0, 22)
 	statusLabel.Position = UDim2.new(0, 12, 1, -72)
@@ -173,11 +172,10 @@ local state = {
 	statusLabel.Text = "Estado: Listo para exportar"
 	statusLabel.TextColor3 = Color3.fromRGB(140, 220, 180)
 	statusLabel.Font = Enum.Font.Gotham
-	statusLabel.TextSize = 12
+	statusLabel.TextSize = 11
 	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 	statusLabel.Parent = main
 
-	-- Botón Exportar
 	local exportBtn = Instance.new("TextButton")
 	exportBtn.Size = UDim2.new(1, -24, 0, 38)
 	exportBtn.Position = UDim2.new(0, 12, 1, -46)
