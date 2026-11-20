@@ -1,4 +1,4 @@
--- Serializer.luau (Versión modular optimizada: 120k+ instancias, Terrain por franjas, buffer 64KB y pila O(1))
+-- Serializer.luau (Optimizado para evitar crash en decompile y reducir lag en 120k+ instancias)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -215,9 +215,11 @@ function Serializer.New(ReflectionModule)
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
-		FlushThresholdBytes = 65536,
+		FlushThresholdBytes = 131072, -- 128 KB por bloque para menos llamadas a disco y más velocidad
 		StreamFile = nil,
 		CheckpointFile = "ZeryuxDump_LastStep.txt",
+		DecompileFailures = 0,
+		MaxDecompileFailures = 3,
 	}
 
 	function self:RecordStep(detail: string)
@@ -399,39 +401,21 @@ function Serializer.New(ReflectionModule)
 		if typeof(decompile) ~= "function" then
 			return "-- [Sin decompile]"
 		end
-
-		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
-
-		local done = false
-		local outText = "-- [Error decompile]"
-		local limit = timeoutSec or 0.9
-
-		local co = task.spawn(function()
-			local ok, res = pcall(decompile, scriptInstance)
-			if not done then
-				done = true
-				if ok and type(res) == "string" and #res > 0 then
-					self.DecompiledCount += 1
-					outText = res
-				else
-					outText = "-- [Decompile fallo: " .. tostring(res) .. "]"
-				end
-			end
-		end)
-
-		task.delay(limit, function()
-			if not done then
-				done = true
-				pcall(task.cancel, co)
-				outText = string.format("-- [Timeout %.1fs: %s]", limit, scriptInstance.Name)
-			end
-		end)
-
-		while not done and not self.Cancelled do
-			task.wait(0.03)
+		if self.DecompileFailures >= self.MaxDecompileFailures then
+			return "-- [Decompile desactivado tras fallos]"
 		end
 
-		return outText
+		self:Flush(true)
+		self:RecordStep("DECOMPILE -> " .. scriptInstance.ClassName .. ":" .. scriptInstance.Name)
+
+		local ok, res = pcall(decompile, scriptInstance)
+		if ok and type(res) == "string" and #res > 0 then
+			self.DecompiledCount += 1
+			return res
+		end
+
+		self.DecompileFailures += 1
+		return "-- [Decompile omitido/fallo: " .. tostring(res) .. "]"
 	end
 
 	function self:ShouldSkip(instance: Instance, options): boolean
@@ -547,7 +531,7 @@ function Serializer.New(ReflectionModule)
 
 		local stack = { { inst = root, opened = false, hasClosingTag = false } }
 		local top = 1
-		local yieldEvery = options.YieldEvery or 140
+		local yieldEvery = options.YieldEvery or 250
 
 		while top > 0 and not self.Cancelled do
 			local entry = stack[top]
@@ -560,9 +544,8 @@ function Serializer.New(ReflectionModule)
 
 				self.ProcessedCount += 1
 				if self.ProcessedCount % yieldEvery == 0 then
-					self:RecordStep("NODE -> " .. inst.ClassName .. ":" .. inst.Name)
 					self:Flush(false)
-					if self.ProcessedCount % 1600 == 0 then
+					if self.ProcessedCount % 2500 == 0 then
 						pcall(collectgarbage, "step", 128)
 					end
 					if onProgress then
@@ -599,6 +582,7 @@ function Serializer.New(ReflectionModule)
 		self.DecompiledCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
+		self.DecompileFailures = 0
 		self.Cancelled = false
 
 		self:RecordStep("START -> " .. tostring(fileName))
