@@ -1,4 +1,4 @@
--- Serializer.luau (Optimizado para velocidad, cero crash en custom-kit-creation y cierre XML limpio)
+-- Serializer.luau (Whole Update: filtros por clase/nombre/profundidad, presets, métricas y reporte)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -20,27 +20,28 @@ local function toBase64(data: string): string
 	if len == 0 then return "" end
 	local out = table.create(math.ceil(len / 3) * 4)
 	local idx = 0
+	local sSub = string.sub
+	local sByte = string.byte
+	local bor = bit32.bor
+	local lshift = bit32.lshift
+	local extract = bit32.extract
 
 	for i = 1, len, 3 do
-		local b1 = string.byte(data, i)
-		local b2 = (i + 1 <= len) and string.byte(data, i + 1) or 0
-		local b3 = (i + 2 <= len) and string.byte(data, i + 2) or 0
+		local b1 = sByte(data, i)
+		local b2 = (i + 1 <= len) and sByte(data, i + 1) or 0
+		local b3 = (i + 2 <= len) and sByte(data, i + 2) or 0
 
-		local triple = bit32.bor(
-			bit32.lshift(b1, 16),
-			bit32.lshift(b2, 8),
-			b3
-		)
+		local triple = bor(lshift(b1, 16), lshift(b2, 8), b3)
 
-		local c1 = bit32.extract(triple, 18, 6) + 1
-		local c2 = bit32.extract(triple, 12, 6) + 1
-		local c3 = bit32.extract(triple, 6, 6) + 1
-		local c4 = bit32.extract(triple, 0, 6) + 1
+		local c1 = extract(triple, 18, 6) + 1
+		local c2 = extract(triple, 12, 6) + 1
+		local c3 = extract(triple, 6, 6) + 1
+		local c4 = extract(triple, 0, 6) + 1
 
-		idx += 1; out[idx] = string.sub(B64_CHARS, c1, c1)
-		idx += 1; out[idx] = string.sub(B64_CHARS, c2, c2)
-		idx += 1; out[idx] = (i + 1 <= len) and string.sub(B64_CHARS, c3, c3) or "="
-		idx += 1; out[idx] = (i + 2 <= len) and string.sub(B64_CHARS, c4, c4) or "="
+		idx += 1; out[idx] = sSub(B64_CHARS, c1, c1)
+		idx += 1; out[idx] = sSub(B64_CHARS, c2, c2)
+		idx += 1; out[idx] = (i + 1 <= len) and sSub(B64_CHARS, c3, c3) or "="
+		idx += 1; out[idx] = (i + 2 <= len) and sSub(B64_CHARS, c4, c4) or "="
 	end
 
 	return table.concat(out)
@@ -59,7 +60,7 @@ end
 
 local function formatProtectedString(name: string, src: string): string
 	local safeCdata = string.find(src, "]]>", 1, true) and string.gsub(src, "]]>", "]]]]><![CDATA[>") or src
-	return string.format('<ProtectedString name="%s"><![CDATA[%s]]></ProtectedString>', name, safeCdata)
+	return '<ProtectedString name="' .. name .. '"><![CDATA[' .. safeCdata .. ']]></ProtectedString>'
 end
 
 local DefaultValues = {
@@ -108,6 +109,53 @@ local function readPropDirect(inst: Instance, propName: string): (boolean, any)
 	return pcall(function(o, p)
 		return o[p]
 	end, inst, propName)
+end
+
+local function isProblematicDecompileScript(inst: Instance): boolean
+	local nameLower = string.lower(inst.Name)
+	return string.find(nameLower, "custom-kit-creation", 1, true) ~= nil
+end
+
+local function readBytecodeB64(scriptInstance: Instance): string?
+	if typeof(getscriptbytecode) ~= "function" then
+		return nil
+	end
+	local ok, bc = pcall(getscriptbytecode, scriptInstance)
+	if ok and type(bc) == "string" and #bc > 0 then
+		return toBase64(bc)
+	end
+	return nil
+end
+
+local function tryDecompileQuick(scriptInstance: Instance, maxWaitSec: number): string?
+	if typeof(decompile) ~= "function" then
+		return nil
+	end
+	local done = false
+	local resultStr: string? = nil
+
+	local co = task.spawn(function()
+		local ok, res = pcall(decompile, scriptInstance)
+		if not done then
+			done = true
+			if ok and type(res) == "string" and #res > 0 then
+				resultStr = res
+			end
+		end
+	end)
+
+	local deadline = os.clock() + maxWaitSec
+	while not done and os.clock() < deadline do
+		task.wait(0.015)
+	end
+
+	if not done then
+		done = true
+		pcall(task.cancel, co)
+		return nil
+	end
+
+	return resultStr
 end
 
 local function buildSmoothGridBinaryChunked(
@@ -200,7 +248,7 @@ local function buildSmoothGridBinaryChunked(
 			end
 		end
 
-		if (os.clock() - lastYield) >= 0.22 or s == slices - 1 then
+		if (os.clock() - lastYield) >= 0.30 or s == slices - 1 then
 			lastYield = os.clock()
 			if onChunkStep then
 				onChunkStep(string.format("Terrain %d/%d", s + 1, slices))
@@ -212,12 +260,19 @@ local function buildSmoothGridBinaryChunked(
 	return table.concat(bytes)
 end
 
-local function isProblematicDecompileScript(inst: Instance): boolean
-	local nameLower = string.lower(inst.Name)
-	if string.find(nameLower, "custom-kit-creation", 1, true) then
-		return true
+local function matchesNameFilter(name: string, includeSubstr: string?, excludeSubstr: string?): boolean
+	local lower = string.lower(name)
+	if excludeSubstr and excludeSubstr ~= "" then
+		if string.find(lower, string.lower(excludeSubstr), 1, true) then
+			return false
+		end
 	end
-	return false
+	if includeSubstr and includeSubstr ~= "" then
+		if not string.find(lower, string.lower(includeSubstr), 1, true) then
+			return false
+		end
+	end
+	return true
 end
 
 function Serializer.New(ReflectionModule)
@@ -229,15 +284,17 @@ function Serializer.New(ReflectionModule)
 		TotalEstimate = 1,
 		EstimatedBytes = 0,
 		DecompiledCount = 0,
+		BytecodeFallbackCount = 0,
+		DirectSourceCount = 0,
 		NilCount = 0,
 		KeyframeSequencesCount = 0,
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
-		FlushThresholdBytes = 524288, -- 512 KB por bloque
+		FlushThresholdBytes = 1048576, -- 1 MB por bloque
 		StreamFile = nil,
 		CheckpointFile = "ZeryuxDump_LastStep.txt",
-		PendingScripts = {},
+		ReportFile = "ZeryuxDump_Report.txt",
 		CompiledPropListCache = {},
 	}
 
@@ -267,6 +324,24 @@ function Serializer.New(ReflectionModule)
 		end
 	end
 
+	function self:WriteReport(statusText: string, elapsedSec: number, outPath: string)
+		if typeof(writefile) ~= "function" or not self.ReportFile then return end
+		local mb = self.EstimatedBytes / (1024 * 1024)
+		local rate = (elapsedSec > 0) and ((self.EstimatedBytes / 1024) / elapsedSec) or 0
+		local lines = {
+			"=== ZERYUX DUMP REPORT ===",
+			"Estado: " .. statusText,
+			"Archivo: " .. tostring(outPath),
+			string.format("Tiempo total: %.2f s (%.2f min)", elapsedSec, elapsedSec / 60),
+			string.format("Instancias procesadas: %d / ~%d", self.ProcessedCount, self.TotalEstimate),
+			string.format("Tamano aprox: %.2f MB (%d bytes)", mb, self.EstimatedBytes),
+			string.format("Velocidad escritura: %.1f KB/s", rate),
+			string.format("Scripts -> Source directo: %d | Decompilados: %d | Bytecode B64: %d", self.DirectSourceCount, self.DecompiledCount, self.BytecodeFallbackCount),
+			"NilInstances: " .. tostring(self.NilCount),
+		}
+		pcall(writefile, self.ReportFile, table.concat(lines, "\n"))
+	end
+
 	function self:GetReferent(instance: Instance): string
 		local existing = self.ReferentMap[instance]
 		if existing then
@@ -279,11 +354,12 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:Flush(force: boolean?)
-		if #self.ChunkBuffer == 0 then return end
+		local buf = self.ChunkBuffer
+		if #buf == 0 then return end
 		if not force and self.PendingChunkBytes < self.FlushThresholdBytes then return end
 
-		local chunk = table.concat(self.ChunkBuffer, "\n") .. "\n"
-		clearTable(self.ChunkBuffer)
+		local chunk = table.concat(buf, "\n") .. "\n"
+		clearTable(buf)
 		self.PendingChunkBytes = 0
 
 		if self.StreamFile and typeof(appendfile) == "function" then
@@ -292,7 +368,8 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:Emit(line: string)
-		table.insert(self.ChunkBuffer, line)
+		local buf = self.ChunkBuffer
+		buf[#buf + 1] = line
 		local lineBytes = #line + 1
 		self.EstimatedBytes += lineBytes
 		self.PendingChunkBytes += lineBytes
@@ -301,103 +378,113 @@ function Serializer.New(ReflectionModule)
 		end
 	end
 
+	local seqPartsBuf = {}
+	local sFmt = string.format
+
 	local TypeHandlers = {
 		string = function(name, val)
-			return string.format('<string name="%s">%s</string>', name, escapeXml(tostring(val)))
+			return '<string name="' .. name .. '">' .. escapeXml(tostring(val)) .. '</string>'
 		end,
 		BinaryString = function(name, val)
-			return string.format('<BinaryString name="%s">%s</BinaryString>', name, toBase64(tostring(val)))
+			return '<BinaryString name="' .. name .. '">' .. toBase64(tostring(val)) .. '</BinaryString>'
 		end,
 		Content = function(name, val)
 			local s = tostring(val)
 			if s == "" then
-				return string.format('<Content name="%s"><null></null></Content>', name)
+				return '<Content name="' .. name .. '"><null></null></Content>'
 			end
-			return string.format('<Content name="%s"><url>%s</url></Content>', name, escapeXml(s))
+			return '<Content name="' .. name .. '"><url>' .. escapeXml(s) .. '</url></Content>'
 		end,
 		bool = function(name, val)
-			return string.format('<bool name="%s">%s</bool>', name, val and "true" or "false")
+			return '<bool name="' .. name .. '">' .. (val and "true" or "false") .. '</bool>'
 		end,
 		int = function(name, val)
-			return string.format('<int name="%s">%d</int>', name, math.floor(tonumber(val) or 0))
+			return '<int name="' .. name .. '">' .. tostring(math.floor(tonumber(val) or 0)) .. '</int>'
 		end,
 		int64 = function(name, val)
-			return string.format('<int64 name="%s">%s</int64>', name, tostring(val))
+			return '<int64 name="' .. name .. '">' .. tostring(val) .. '</int64>'
 		end,
 		float = function(name, val)
-			return string.format('<float name="%s">%s</float>', name, tostring(val))
+			return '<float name="' .. name .. '">' .. tostring(val) .. '</float>'
 		end,
 		double = function(name, val)
-			return string.format('<double name="%s">%s</double>', name, tostring(val))
+			return '<double name="' .. name .. '">' .. tostring(val) .. '</double>'
 		end,
 		token = function(name, val)
 			local num = typeof(val) == "EnumItem" and val.Value or tonumber(val) or 0
-			return string.format('<token name="%s">%d</token>', name, num)
+			return '<token name="' .. name .. '">' .. tostring(num) .. '</token>'
 		end,
 		BrickColor = function(name, val)
 			local bc = typeof(val) == "BrickColor" and val or BrickColor.new(tonumber(val) or 194)
-			return string.format('<int name="%s">%d</int>', name, bc.Number)
+			return '<int name="' .. name .. '">' .. tostring(bc.Number) .. '</int>'
 		end,
 		PhysicalProperties = function(name, val)
 			if typeof(val) ~= "PhysicalProperties" then
-				return string.format('<PhysicalProperties name="%s"><CustomPhysics>false</CustomPhysics></PhysicalProperties>', name)
+				return '<PhysicalProperties name="' .. name .. '"><CustomPhysics>false</CustomPhysics></PhysicalProperties>'
 			end
-			return string.format(
+			return sFmt(
 				'<PhysicalProperties name="%s"><CustomPhysics>true</CustomPhysics><Density>%s</Density><Friction>%s</Friction><Elasticity>%s</Elasticity><FrictionWeight>%s</FrictionWeight><ElasticityWeight>%s</ElasticityWeight></PhysicalProperties>',
 				name, val.Density, val.Friction, val.Elasticity, val.FrictionWeight, val.ElasticityWeight
 			)
 		end,
 		Rect = function(name, val)
-			return string.format(
+			return sFmt(
 				'<Rect name="%s"><min><X>%s</X><Y>%s</Y></min><max><X>%s</X><Y>%s</Y></max></Rect>',
 				name, val.Min.X, val.Min.Y, val.Max.X, val.Max.Y
 			)
 		end,
 		Color3 = function(name, val)
-			return string.format('<Color3 name="%s"><R>%s</R><G>%s</G><B>%s</B></Color3>', name, val.R, val.G, val.B)
+			return sFmt('<Color3 name="%s"><R>%s</R><G>%s</G><B>%s</B></Color3>', name, val.R, val.G, val.B)
 		end,
 		Color3uint8 = function(name, val)
 			local r = math.floor(val.R * 255 + 0.5)
 			local g = math.floor(val.G * 255 + 0.5)
 			local b = math.floor(val.B * 255 + 0.5)
 			local packed = bit32.bor(0xFF000000, bit32.lshift(r, 16), bit32.lshift(g, 8), b)
-			return string.format('<Color3uint8 name="%s">%u</Color3uint8>', name, packed)
+			return sFmt('<Color3uint8 name="%s">%u</Color3uint8>', name, packed)
 		end,
 		Vector2 = function(name, val)
-			return string.format('<Vector2 name="%s"><X>%s</X><Y>%s</Y></Vector2>', name, val.X, val.Y)
+			return sFmt('<Vector2 name="%s"><X>%s</X><Y>%s</Y></Vector2>', name, val.X, val.Y)
 		end,
 		Vector3 = function(name, val)
-			return string.format('<Vector3 name="%s"><X>%s</X><Y>%s</Y><Z>%s</Z></Vector3>', name, val.X, val.Y, val.Z)
+			return sFmt('<Vector3 name="%s"><X>%s</X><Y>%s</Y><Z>%s</Z></Vector3>', name, val.X, val.Y, val.Z)
 		end,
 		UDim = function(name, val)
-			return string.format('<UDim name="%s"><S>%s</S><O>%d</O></UDim>', name, val.Scale, val.Offset)
+			return sFmt('<UDim name="%s"><S>%s</S><O>%d</O></UDim>', name, val.Scale, val.Offset)
 		end,
 		UDim2 = function(name, val)
-			return string.format(
+			return sFmt(
 				'<UDim2 name="%s"><XS>%s</XS><XO>%d</XO><YS>%s</YS><YO>%d</YO></UDim2>',
 				name, val.X.Scale, val.X.Offset, val.Y.Scale, val.Y.Offset
 			)
 		end,
 		NumberRange = function(name, val)
-			return string.format('<NumberRange name="%s">%s %s </NumberRange>', name, val.Min, val.Max)
+			return sFmt('<NumberRange name="%s">%s %s </NumberRange>', name, val.Min, val.Max)
 		end,
 		ColorSequence = function(name, val)
-			local parts = {}
-			for _, kp in ipairs(val.Keypoints) do
-				table.insert(parts, string.format("%s %s %s %s 0", kp.Time, kp.Value.R, kp.Value.G, kp.Value.B))
+			clearTable(seqPartsBuf)
+			local kps = val.Keypoints
+			local n = #kps
+			for i = 1, n do
+				local kp = kps[i]
+				local c = kp.Value
+				seqPartsBuf[i] = sFmt("%s %s %s %s 0", kp.Time, c.R, c.G, c.B)
 			end
-			return string.format('<ColorSequence name="%s">%s </ColorSequence>', name, table.concat(parts, " "))
+			return '<ColorSequence name="' .. name .. '">' .. table.concat(seqPartsBuf, " ", 1, n) .. ' </ColorSequence>'
 		end,
 		NumberSequence = function(name, val)
-			local parts = {}
-			for _, kp in ipairs(val.Keypoints) do
-				table.insert(parts, string.format("%s %s %s", kp.Time, kp.Value, kp.Envelope or 0))
+			clearTable(seqPartsBuf)
+			local kps = val.Keypoints
+			local n = #kps
+			for i = 1, n do
+				local kp = kps[i]
+				seqPartsBuf[i] = sFmt("%s %s %s", kp.Time, kp.Value, kp.Envelope or 0)
 			end
-			return string.format('<NumberSequence name="%s">%s </NumberSequence>', name, table.concat(parts, " "))
+			return '<NumberSequence name="' .. name .. '">' .. table.concat(seqPartsBuf, " ", 1, n) .. ' </NumberSequence>'
 		end,
 		CoordinateFrame = function(name, val)
 			local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = val:GetComponents()
-			return string.format(
+			return sFmt(
 				'<CoordinateFrame name="%s"><X>%s</X><Y>%s</Y><Z>%s</Z>' ..
 				'<R00>%s</R00><R01>%s</R01><R02>%s</R02>' ..
 				'<R10>%s</R10><R11>%s</R11><R12>%s</R12>' ..
@@ -407,7 +494,7 @@ function Serializer.New(ReflectionModule)
 		end,
 		Ref = function(name, val)
 			local ref = val and self:GetReferent(val) or "null"
-			return string.format('<Ref name="%s">%s</Ref>', name, ref)
+			return '<Ref name="' .. name .. '">' .. ref .. '</Ref>'
 		end,
 	}
 
@@ -436,49 +523,42 @@ function Serializer.New(ReflectionModule)
 		return math.max(1, total)
 	end
 
-	local function readBytecodeB64(scriptInstance: Instance): string?
-		if typeof(getscriptbytecode) ~= "function" then
-			return nil
-		end
-		local ok, bc = pcall(getscriptbytecode, scriptInstance)
-		if ok and type(bc) == "string" and #bc > 0 then
-			return toBase64(bc)
-		end
-		return nil
-	end
-
-	function self:TranscribeScriptEntry(entry, options): string
-		local scriptInstance = entry.inst
-		if not scriptInstance then
-			return "-- [Script no disponible]"
+	function self:ResolveScriptSourceInline(scriptInstance: Instance, options): string
+		local okSrc, srcVal = readPropDirect(scriptInstance, "Source")
+		if okSrc and type(srcVal) == "string" and srcVal ~= "" then
+			self.DirectSourceCount += 1
+			return srcVal
 		end
 
-		if type(entry.directSrc) == "string" and entry.directSrc ~= "" then
-			return entry.directSrc
-		end
+		local bcB64 = readBytecodeB64(scriptInstance)
 
-		local bcB64 = entry.bcB64 or readBytecodeB64(scriptInstance)
-
-		if options.UseDecompiler and typeof(decompile) == "function" and not isProblematicDecompileScript(scriptInstance) then
-			local okDec, decRes = pcall(decompile, scriptInstance)
-			if okDec and type(decRes) == "string" and #decRes > 0 then
+		if options.UseDecompiler and not isProblematicDecompileScript(scriptInstance) then
+			local dec = tryDecompileQuick(scriptInstance, options.DecompileTimeout or 0.25)
+			if dec then
 				self.DecompiledCount += 1
-				return decRes
+				return dec
 			end
 		end
 
 		if type(bcB64) == "string" and #bcB64 > 0 then
+			self.BytecodeFallbackCount += 1
 			return "-- [Bytecode Luau Base64]\n-- " .. bcB64
 		end
 
 		return "-- [Sin Source ni bytecode accesible]"
 	end
 
-	function self:ShouldSkip(instance: Instance, options): boolean
+	function self:ShouldSkip(instance: Instance, options, depth: number?): boolean
+		if options.MaxDepth and depth and depth > options.MaxDepth then
+			return true
+		end
 		if options.IgnorePlayers and Players:GetPlayerFromCharacter(instance) then
 			return true
 		end
 		if options.Mode == "map_ui" and instance:IsA("LuaSourceContainer") then
+			return true
+		end
+		if options.Mode == "scripts_only" and not instance:IsA("LuaSourceContainer") and #instance:GetChildren() == 0 then
 			return true
 		end
 		if not options.SaveScripts and instance:IsA("LuaSourceContainer") then
@@ -489,6 +569,19 @@ function Serializer.New(ReflectionModule)
 		end
 		if instance:IsA("Terrain") and not options.SaveTerrain then
 			return true
+		end
+		if options.ExcludeClasses and options.ExcludeClasses[instance.ClassName] then
+			return true
+		end
+		if options.IncludeClasses and next(options.IncludeClasses) ~= nil then
+			if not options.IncludeClasses[instance.ClassName] and #instance:GetChildren() == 0 then
+				return true
+			end
+		end
+		if not matchesNameFilter(instance.Name, options.IncludeNameFilter, options.ExcludeNameFilter) then
+			if #instance:GetChildren() == 0 then
+				return true
+			end
 		end
 		return false
 	end
@@ -505,7 +598,7 @@ function Serializer.New(ReflectionModule)
 		local canHidden = (not skipComplexGui) and (typeof(gethiddenproperty) == "function")
 		local ref = self:GetReferent(instance)
 
-		self:Emit(string.format('<Item class="%s" referent="%s">', className, ref))
+		self:Emit('<Item class="' .. className .. '" referent="' .. ref .. '">')
 		self:Emit("<Properties>")
 
 		for i = 1, #propList do
@@ -519,16 +612,8 @@ function Serializer.New(ReflectionModule)
 			end
 
 			if propName == "Source" and instance:IsA("LuaSourceContainer") then
-				local okSrc, srcVal = readPropDirect(instance, "Source")
-				local directSrc = (okSrc and type(srcVal) == "string" and srcVal ~= "") and srcVal or nil
-				local bcB64 = directSrc and nil or readBytecodeB64(instance)
-
-				table.insert(self.PendingScripts, {
-					inst = instance,
-					directSrc = directSrc,
-					bcB64 = bcB64,
-				})
-				self:Emit(formatProtectedString("Source", "-- [Script en cola Fase 2: " .. instance.Name .. "]"))
+				local resolvedSrc = self:ResolveScriptSourceInline(instance, options)
+				self:Emit(formatProtectedString("Source", resolvedSrc))
 			elseif propName == "SmoothGrid" and instance:IsA("Terrain") then
 				local gridBin = buildSmoothGridBinaryChunked(
 					instance :: Terrain,
@@ -578,19 +663,22 @@ function Serializer.New(ReflectionModule)
 	end
 
 	function self:TraverseIterative(root: Instance, options, onProgress)
-		if self.Cancelled or self:ShouldSkip(root, options) then
+		if self.Cancelled or self:ShouldSkip(root, options, 0) then
 			return
 		end
 
 		local stackInst = { root }
 		local stackState = { 0 }
+		local stackDepth = { 0 }
 		local top = 1
 		local lastYield = os.clock()
 		local sinceGc = 0
+		local sinceCheckpoint = 0
 
 		while top > 0 and not self.Cancelled do
 			local inst = stackInst[top]
 			local state = stackState[top]
+			local depth = stackDepth[top]
 
 			if state == 0 then
 				local openedItem = self:WriteNodeOpen(inst, options, onProgress)
@@ -598,13 +686,18 @@ function Serializer.New(ReflectionModule)
 
 				self.ProcessedCount += 1
 				sinceGc += 1
+				sinceCheckpoint += 1
 
-				if (os.clock() - lastYield) >= 0.22 then
+				if (os.clock() - lastYield) >= 0.30 then
 					lastYield = os.clock()
 					self:Flush(false)
-					if sinceGc >= 10000 then
+					if sinceGc >= 15000 then
 						sinceGc = 0
 						pcall(collectgarbage, "step", 64)
+					end
+					if sinceCheckpoint >= 25000 then
+						sinceCheckpoint = 0
+						self:RecordStep("NODE -> " .. inst.ClassName .. ":" .. inst.Name)
 					end
 					if onProgress then
 						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, inst.Name)
@@ -612,13 +705,17 @@ function Serializer.New(ReflectionModule)
 					task.wait()
 				end
 
-				local children = inst:GetChildren()
-				for i = #children, 1, -1 do
-					local child = children[i]
-					if not self:ShouldSkip(child, options) then
-						top += 1
-						stackInst[top] = child
-						stackState[top] = 0
+				local nextDepth = depth + 1
+				if not options.MaxDepth or nextDepth <= options.MaxDepth then
+					local children = inst:GetChildren()
+					for i = #children, 1, -1 do
+						local child = children[i]
+						if not self:ShouldSkip(child, options, nextDepth) then
+							top += 1
+							stackInst[top] = child
+							stackState[top] = 0
+							stackDepth[top] = nextDepth
+						end
 					end
 				end
 			else
@@ -627,20 +724,23 @@ function Serializer.New(ReflectionModule)
 				end
 				stackInst[top] = nil
 				stackState[top] = nil
+				stackDepth[top] = nil
 				top -= 1
 			end
 		end
 	end
 
 	function self:RunToFile(fileName: string?, options, onProgress): (boolean, string, number)
+		local startClock = os.clock()
 		self.ReferentCount = 0
 		clearTable(self.ReferentMap)
 		clearTable(self.ChunkBuffer)
-		clearTable(self.PendingScripts)
 		self.PendingChunkBytes = 0
 		self.ProcessedCount = 0
 		self.EstimatedBytes = 0
 		self.DecompiledCount = 0
+		self.BytecodeFallbackCount = 0
+		self.DirectSourceCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
 		self.Cancelled = false
@@ -661,6 +761,7 @@ function Serializer.New(ReflectionModule)
 			if not okWrite then
 				self.StreamFile = nil
 				canStream = false
+				self:WriteReport("ERROR_WRITEFILE: " .. tostring(errWrite), os.clock() - startClock, tostring(fileName))
 				return false, "Error writefile: " .. tostring(errWrite), 0
 			end
 			self.EstimatedBytes += #header
@@ -710,7 +811,7 @@ function Serializer.New(ReflectionModule)
 				local nilFolderOpen = false
 				for _, inst in ipairs(nilList) do
 					if self.Cancelled then break end
-					if typeof(inst) == "Instance" and inst.Parent == nil and not self:ShouldSkip(inst, options) then
+					if typeof(inst) == "Instance" and inst.Parent == nil and not self:ShouldSkip(inst, options, 1) then
 						if not nilFolderOpen then
 							self:Emit('<Item class="Folder" referent="RBX_NIL_ROOT"><Properties><string name="Name">NilInstances</string></Properties>')
 							nilFolderOpen = true
@@ -725,55 +826,30 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
-		if not self.Cancelled and #self.PendingScripts > 0 then
-			self:Flush(true)
-			self:RecordStep("PHASE2_SCRIPTS -> " .. tostring(#self.PendingScripts))
-			self:Emit('<Item class="Folder" referent="RBX_SCRIPTS_TRANSCRIPT"><Properties><string name="Name">ScriptsTranscript</string></Properties>')
-			local lastScriptYield = os.clock()
-			local totalScripts = #self.PendingScripts
-
-			for idx = 1, totalScripts do
-				if self.Cancelled then break end
-				local entry = self.PendingScripts[idx]
-				local sInst = entry.inst
-				if sInst and sInst.Parent ~= nil then
-					local codeText = self:TranscribeScriptEntry(entry, options)
-					self:Emit(string.format('<Item class="%s" referent="RBX_SCR_%d"><Properties>', sInst.ClassName, idx))
-					self:Emit(TypeHandlers.string("Name", sInst.Name))
-					self:Emit(formatProtectedString("Source", codeText))
-					self:Emit("</Properties></Item>")
-				end
-
-				if (os.clock() - lastScriptYield) >= 0.22 or idx == totalScripts then
-					lastScriptYield = os.clock()
-					self:Flush(false)
-					if onProgress then
-						onProgress(self.ProcessedCount, self.TotalEstimate, self.EstimatedBytes, string.format("Scripts %d/%d", idx, totalScripts))
-					end
-					task.wait()
-				end
-			end
-			self:Emit("</Item>")
-			self:Flush(true)
-		end
-
 		self:Emit("</roblox>")
 		self:RecordStep("DONE")
 
+		local elapsed = os.clock() - startClock
+		local statusLabel = self.Cancelled and "CANCELLED" or "COMPLETED"
+
 		if canStream and self.StreamFile then
 			self:Flush(true)
+			self:WriteReport(statusLabel, elapsed, self.StreamFile)
 			return true, self.StreamFile, self.EstimatedBytes
 		elseif typeof(writefile) == "function" and fileName then
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
 			clearTable(self.ChunkBuffer)
 			local okW, errW = pcall(writefile, fileName, fullXml)
 			if not okW then
+				self:WriteReport("ERROR_WRITEFILE", elapsed, fileName)
 				return false, "Error writefile: " .. tostring(errW), #fullXml
 			end
+			self:WriteReport(statusLabel, elapsed, fileName)
 			return true, fileName, #fullXml
 		else
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
 			clearTable(self.ChunkBuffer)
+			self:WriteReport(statusLabel, elapsed, "MEMORIA")
 			return true, "MEMORIA", #fullXml
 		end
 	end
