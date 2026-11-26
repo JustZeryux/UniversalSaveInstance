@@ -7,17 +7,18 @@ function Main.BuildOptions(presetName: string?, overrides: {[string]: any}?)
 	local preset = presetName or "full_dump"
 	local opts = {
 		Mode = "full",
-		SaveScripts = true,
-		UseDecompiler = true,
-		DecompileTimeout = 0.25,
+		SaveScripts = false,
+		UseDecompiler = false,
+		DecompileTimeout = 0.2,
 		SaveTerrain = true,
 		TerrainHalfExtent = 128,
-		NilInstances = true,
+		NilInstances = false,
 		IncludeLocalPlayerData = true,
-		IgnorePlayers = true,
+		IgnorePlayers = false,
 		IgnoreDefaultProps = true,
 		SafeUIMode = false,
 		SaveTagsAndAttributes = true,
+		YieldInterval = 0.75,
 		MaxDepth = nil,
 		IncludeNameFilter = nil,
 		ExcludeNameFilter = nil,
@@ -64,25 +65,22 @@ end
 
 function Main.RunExport(serializerInstance, fileName: string, options, onProgress, onFinished)
 	task.spawn(function()
-		local ok, outPathOrErr, bytes = pcall(function()
+		local callOk, exportOk, outPathOrErr, bytes = pcall(function()
 			return serializerInstance:RunToFile(fileName, options, onProgress)
 		end)
 
-		if not ok then
+		if not callOk then
 			pcall(function()
-				serializerInstance:Flush(true)
-				serializerInstance:Emit("</roblox>")
-				serializerInstance:Flush(true)
-				serializerInstance:RecordStep("CRASH_GUARD -> " .. tostring(outPathOrErr))
+				serializerInstance:RecordStep("CRASH_GUARD -> " .. tostring(exportOk))
 			end)
 			if onFinished then
-				onFinished(false, tostring(outPathOrErr), 0)
+				onFinished(false, tostring(exportOk), 0)
 			end
 			return
 		end
 
 		if onFinished then
-			onFinished(outPathOrErr, tostring(outPathOrErr), bytes or 0)
+			onFinished(exportOk == true, tostring(outPathOrErr), bytes or 0)
 		end
 	end)
 end

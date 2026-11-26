@@ -57,6 +57,23 @@ local Classes = {
 			EnvironmentDiffuseScale = "float",
 			EnvironmentSpecularScale = "float",
 			ShadowSoftness = "float",
+			Technology = "token",
+			FogColor = "Color3",
+			FogEnd = "float",
+			FogStart = "float",
+		}
+	},
+	MaterialService = { Inherits = "Instance", Properties = {} },
+	MaterialVariant = {
+		Inherits = "Instance",
+		Properties = {
+			BaseMaterial = "token",
+			ColorMapContent = "Content",
+			MetalnessMapContent = "Content",
+			NormalMapContent = "Content",
+			RoughnessMapContent = "Content",
+			TexturePackContent = "Content",
+			StudsPerTile = "Vector2",
 		}
 	},
 	ReplicatedStorage = { Inherits = "Instance", Properties = {} },
@@ -104,6 +121,7 @@ local Classes = {
 			Reflectance = "float",
 			CastShadow = "bool",
 			CustomPhysicalProperties = "PhysicalProperties",
+			MaterialVariant = "string",
 		}
 	},
 	Part = { Inherits = "BasePart", Properties = { Shape = "token" } },
@@ -129,14 +147,48 @@ local Classes = {
 			AllowTeamChangeOnTouch = "bool",
 		}
 	},
-	MeshPart = {
+	-- TriangleMeshPart is the common base for MeshPart and solid-model parts.
+	TriangleMeshPart = {
 		Inherits = "BasePart",
 		Properties = {
-			MeshId = "Content",
-			TextureID = "Content",
-			DoubleSided = "bool",
+			-- Hidden geometry metadata may be readable through an executor's
+			-- property bridge, but Roblox does not expose it to normal scripts.
+			PhysicalConfigData = "SharedString",
+			AeroMeshData = "SharedString",
 		}
 	},
+	MeshPart = {
+		Inherits = "TriangleMeshPart",
+		Properties = {
+			MeshContent = "Content",
+			TextureContent = "Content",
+			DoubleSided = "bool",
+			RenderFidelity = "token",
+		}
+	},
+	PartOperation = {
+		Inherits = "TriangleMeshPart",
+		Properties = {
+			RenderFidelity = "token",
+			SmoothingAngle = "float",
+			UsePartColor = "bool",
+			-- CSG backing data. ChildData/MeshData are legacy BinaryStrings;
+			-- ChildData2/MeshData2 use SharedString in newer serialization.
+			AssetId = "Content",
+			Content = "Content",
+			ChildData = "BinaryString",
+			MeshData = "BinaryString",
+			PhysicsData = "BinaryString",
+			ChildData2 = "SharedString",
+			MeshData2 = "SharedString",
+			ComponentIndex = "int",
+			InitialSize = "Vector3",
+			OffCentered = "bool",
+		}
+	},
+	UnionOperation = { Inherits = "PartOperation", Properties = {} },
+	NegateOperation = { Inherits = "PartOperation", Properties = {} },
+	IntersectOperation = { Inherits = "PartOperation", Properties = {} },
 	Model = {
 		Inherits = "Instance",
 		Properties = {
@@ -174,6 +226,74 @@ local Classes = {
 		}
 	},
 
+	-- Accesorios y ropa 3D de avatares.
+	Accoutrement = {
+		Inherits = "Instance",
+		Properties = {
+			AttachmentForward = "Vector3",
+			AttachmentPoint = "CoordinateFrame",
+			AttachmentPos = "Vector3",
+			AttachmentRight = "Vector3",
+			AttachmentUp = "Vector3",
+		}
+	},
+	Accessory = { Inherits = "Accoutrement", Properties = { AccessoryType = "token" } },
+	Hat = { Inherits = "Accoutrement", Properties = {} },
+	BaseWrap = {
+		Inherits = "Instance",
+		Properties = {
+			CageMeshContent = "Content",
+			CageOrigin = "CoordinateFrame",
+			HSRContent = "Content",
+			ImportOrigin = "CoordinateFrame",
+		}
+	},
+	WrapLayer = {
+		Inherits = "BaseWrap",
+		Properties = {
+			AutoSkin = "token",
+			BindOffset = "CoordinateFrame",
+			Color = "Color3",
+			DebugMode = "token",
+			Enabled = "bool",
+			Order = "int",
+			Puffiness = "float",
+			ReferenceMeshContent = "Content",
+			ReferenceOrigin = "CoordinateFrame",
+			ShrinkFactor = "float",
+		}
+	},
+	WrapTarget = {
+		Inherits = "BaseWrap",
+		Properties = { Color = "Color3", DebugMode = "token", Stiffness = "float" }
+	},
+	WrapDeformer = { Inherits = "BaseWrap", Properties = {} },
+
+	-- Apariencia clásica de personajes (propiedades Content actuales).
+	CharacterMesh = {
+		Inherits = "Instance",
+		Properties = {
+			BodyPart = "token",
+			MeshContent = "Content",
+			BaseTextureContent = "Content",
+			OverlayTextureContent = "Content",
+		}
+	},
+	Shirt = { Inherits = "Instance", Properties = { ShirtTemplateContent = "Content" } },
+	Pants = { Inherits = "Instance", Properties = { PantsTemplateContent = "Content" } },
+	ShirtGraphic = { Inherits = "Instance", Properties = { TextureContent = "Content" } },
+	BodyColors = {
+		Inherits = "Instance",
+		Properties = {
+			HeadColor3 = "Color3",
+			LeftArmColor3 = "Color3",
+			LeftLegColor3 = "Color3",
+			RightArmColor3 = "Color3",
+			RightLegColor3 = "Color3",
+			TorsoColor3 = "Color3",
+		}
+	},
+
 	-- Rigs y Animaciones
 	Humanoid = {
 		Inherits = "Instance",
@@ -195,7 +315,7 @@ local Classes = {
 	Animation = {
 		Inherits = "Instance",
 		Properties = {
-			AnimationId = "Content",
+			AnimationContent = "Content",
 		}
 	},
 	KeyframeSequence = {
@@ -225,28 +345,37 @@ local Classes = {
 	SurfaceAppearance = {
 		Inherits = "Instance",
 		Properties = {
-			ColorMap = "Content",
-			NormalMap = "Content",
-			RoughnessMap = "Content",
-			MetalnessMap = "Content",
+			ColorMapContent = "Content",
+			NormalMapContent = "Content",
+			RoughnessMapContent = "Content",
+			MetalnessMapContent = "Content",
+			TexturePackContent = "Content",
 			AlphaMode = "token",
 		}
 	},
-	SpecialMesh = {
+	DataModelMesh = {
 		Inherits = "Instance",
 		Properties = {
-			MeshId = "Content",
-			TextureId = "Content",
-			MeshType = "token",
 			Scale = "Vector3",
 			Offset = "Vector3",
 			VertexColor = "Vector3",
 		}
 	},
+	FileMesh = {
+		Inherits = "DataModelMesh",
+		Properties = {
+			MeshContent = "Content",
+			TextureContent = "Content",
+		}
+	},
+	SpecialMesh = {
+		Inherits = "FileMesh",
+		Properties = { MeshType = "token" },
+	},
 	Decal = {
 		Inherits = "Instance",
 		Properties = {
-			Texture = "Content",
+			TextureContent = "Content",
 			Face = "token",
 			Transparency = "float",
 			Color3 = "Color3",
@@ -263,7 +392,7 @@ local Classes = {
 	ParticleEmitter = {
 		Inherits = "Instance",
 		Properties = {
-			Texture = "Content",
+			TextureContent = "Content",
 			Color = "ColorSequence",
 			Size = "NumberSequence",
 			Squash = "NumberSequence",
@@ -286,7 +415,7 @@ local Classes = {
 	Beam = {
 		Inherits = "Instance",
 		Properties = {
-			Texture = "Content",
+			TextureContent = "Content",
 			TextureSpeed = "float",
 			TextureLength = "float",
 			Color = "ColorSequence",
@@ -306,7 +435,7 @@ local Classes = {
 	Trail = {
 		Inherits = "Instance",
 		Properties = {
-			Texture = "Content",
+			TextureContent = "Content",
 			Color = "ColorSequence",
 			Lifetime = "float",
 			MinLength = "float",
@@ -367,14 +496,14 @@ local Classes = {
 	Sky = {
 		Inherits = "Instance",
 		Properties = {
-			SkyboxBk = "Content",
-			SkyboxDn = "Content",
-			SkyboxFt = "Content",
-			SkyboxLf = "Content",
-			SkyboxRt = "Content",
-			SkyboxUp = "Content",
-			SunTextureId = "Content",
-			MoonTextureId = "Content",
+			SkyboxBackContent = "Content",
+			SkyboxDownContent = "Content",
+			SkyboxFrontContent = "Content",
+			SkyboxLeftContent = "Content",
+			SkyboxRightContent = "Content",
+			SkyboxUpContent = "Content",
+			SunTextureContent = "Content",
+			MoonTextureContent = "Content",
 			SunAngularSize = "float",
 			MoonAngularSize = "float",
 			CelestialBodiesShown = "bool",
@@ -398,7 +527,7 @@ local Classes = {
 	Sound = {
 		Inherits = "Instance",
 		Properties = {
-			SoundId = "Content",
+			AudioContent = "Content",
 			Volume = "float",
 			PlaybackSpeed = "float",
 			Looped = "bool",
@@ -479,7 +608,7 @@ local Classes = {
 			Style = "token",
 		}
 	},
-	ClickDetector = { Inherits = "Instance", Properties = { MaxActivationDistance = "float", CursorIcon = "Content" } },
+	ClickDetector = { Inherits = "Instance", Properties = { MaxActivationDistance = "float", CursorIconContent = "Content" } },
 	RemoteEvent = { Inherits = "Instance", Properties = {} },
 	RemoteFunction = { Inherits = "Instance", Properties = {} },
 	BindableEvent = { Inherits = "Instance", Properties = {} },
@@ -560,6 +689,9 @@ local Classes = {
 	ScrollingFrame = {
 		Inherits = "GuiObject",
 		Properties = {
+			BottomImageContent = "Content",
+			MidImageContent = "Content",
+			TopImageContent = "Content",
 			CanvasSize = "UDim2",
 			CanvasPosition = "Vector2",
 			ScrollBarThickness = "int",
@@ -603,7 +735,7 @@ local Classes = {
 	ImageLabel = {
 		Inherits = "GuiObject",
 		Properties = {
-			Image = "Content",
+			ImageContent = "Content",
 			ImageColor3 = "Color3",
 			ImageTransparency = "float",
 			ImageRectOffset = "Vector2",
@@ -617,8 +749,8 @@ local Classes = {
 		Inherits = "ImageLabel",
 		Properties = {
 			AutoButtonColor = "bool",
-			HoverImage = "Content",
-			PressedImage = "Content",
+			HoverImageContent = "Content",
+			PressedImageContent = "Content",
 		}
 	},
 	UICorner = { Inherits = "Instance", Properties = { CornerRadius = "UDim" } },
@@ -696,6 +828,58 @@ local Classes = {
 			SortOrder = "token",
 		}
 	},
+}
+
+-- Compatibility aliases: read legacy property names only when the new Content
+-- property cannot be read. The output always uses the modern Content property name.
+Reflection.LegacyContentAliases = {
+	MeshPart = { MeshContent = "MeshId", TextureContent = "TextureID" },
+	SpecialMesh = { MeshContent = "MeshId", TextureContent = "TextureId" },
+	FileMesh = { MeshContent = "MeshId", TextureContent = "TextureId" },
+	SurfaceAppearance = {
+		ColorMapContent = "ColorMap", NormalMapContent = "NormalMap",
+		RoughnessMapContent = "RoughnessMap", MetalnessMapContent = "MetalnessMap",
+	},
+	MaterialVariant = {
+		ColorMapContent = "ColorMap", NormalMapContent = "NormalMap",
+		RoughnessMapContent = "RoughnessMap", MetalnessMapContent = "MetalnessMap",
+		TexturePackContent = "TexturePack",
+	},
+	Decal = { TextureContent = "Texture" },
+	ParticleEmitter = { TextureContent = "Texture" },
+	Beam = { TextureContent = "Texture" },
+	Trail = { TextureContent = "Texture" },
+	Sky = {
+		SkyboxBackContent = "SkyboxBk", SkyboxDownContent = "SkyboxDn",
+		SkyboxFrontContent = "SkyboxFt", SkyboxLeftContent = "SkyboxLf",
+		SkyboxRightContent = "SkyboxRt", SkyboxUpContent = "SkyboxUp",
+		SunTextureContent = "SunTextureId", MoonTextureContent = "MoonTextureId",
+	},
+	Sound = { AudioContent = "SoundId" },
+	Animation = { AnimationContent = "AnimationId" },
+	ClickDetector = { CursorIconContent = "CursorIcon" },
+	ImageLabel = { ImageContent = "Image" },
+	ScrollingFrame = {
+		BottomImageContent = "BottomImage", MidImageContent = "MidImage", TopImageContent = "TopImage",
+	},
+	Texture = { TextureContent = "Texture" },
+	ImageButton = {
+		ImageContent = "Image", HoverImageContent = "HoverImage", PressedImageContent = "PressedImage",
+	},
+	Shirt = { ShirtTemplateContent = "ShirtTemplate" },
+	Pants = { PantsTemplateContent = "PantsTemplate" },
+	ShirtGraphic = { TextureContent = "Graphic" },
+	CharacterMesh = {
+		MeshContent = "MeshId", BaseTextureContent = "BaseTextureId",
+		OverlayTextureContent = "OverlayTextureId",
+	},
+	BaseWrap = { CageMeshContent = "CageMeshId", HSRContent = "HSRAssetId" },
+	WrapLayer = {
+		CageMeshContent = "CageMeshId", HSRContent = "HSRAssetId",
+		ReferenceMeshContent = "ReferenceMeshId",
+	},
+	WrapTarget = { CageMeshContent = "CageMeshId", HSRContent = "HSRAssetId" },
+	WrapDeformer = { CageMeshContent = "CageMeshId", HSRContent = "HSRAssetId" },
 }
 
 local ResolvedCache = {}

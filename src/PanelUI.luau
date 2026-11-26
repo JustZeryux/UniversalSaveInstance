@@ -83,7 +83,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	title.Size = UDim2.new(1, -70, 1, 0)
 	title.Position = UDim2.fromOffset(10, 0)
 	title.BackgroundTransparency = 1
-	title.Text = "ZERYUX DUMP // MOBILE"
+	title.Text = "ZERYUX DUMP // PC"
 	title.TextColor3 = Color3.fromRGB(0, 215, 245)
 	title.Font = Enum.Font.GothamBold
 	title.TextSize = 12
@@ -201,7 +201,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 	tabFiltersBtn.MouseButton1Click:Connect(function() setTab(true) end)
 	tabServicesBtn.MouseButton1Click:Connect(function() setTab(false) end)
 
-	local modes = { "full", "scripts", "map_ui" }
+	local modes = { "full", "scripts_only", "map_ui" }
 	local modeIdx = 1
 
 	local state = {
@@ -209,18 +209,19 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		Services = {
 			Workspace = true,
 			ReplicatedStorage = true,
-			ReplicatedFirst = false,
+			ReplicatedFirst = true,
 			Lighting = true,
 			StarterGui = true,
-			StarterPack = false,
+			StarterPack = true,
 			StarterPlayer = true,
-			SoundService = false,
+			SoundService = true,
+			MaterialService = true,
 		},
-		SaveScripts = true,
-		UseDecompiler = true,
-		DecompileTimeout = 0.9,
-		IgnorePlayers = true,
-		SafeUIMode = true,
+		SaveScripts = false,
+		UseDecompiler = false,
+		DecompileTimeout = 0.2,
+		IgnorePlayers = false,
+		SafeUIMode = false,
 		SaveTerrain = false,
 		TerrainHalfExtent = 128,
 		ConvertAnimationsToKeyframes = false,
@@ -229,7 +230,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		NilInstances = false,
 		IncludeLocalPlayerData = true,
 		SaveTagsAndAttributes = true,
-		YieldEvery = 140,
+		YieldInterval = 0.75,
 	}
 
 	local modeBtn = Instance.new("TextButton")
@@ -247,7 +248,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 		state.Mode = modes[modeIdx]
 		if state.Mode == "full" then
 			modeBtn.Text = "Modo: FULL (Todo lo replicado)"
-		elseif state.Mode == "scripts" then
+		elseif state.Mode == "scripts_only" then
 			modeBtn.Text = "Modo: SCRIPTS (Solo scripts)"
 		else
 			modeBtn.Text = "Modo: MAP_UI (Sin scripts)"
@@ -291,7 +292,7 @@ function PanelUI.Create(onExportCallback, onCancelCallback)
 
 	addToggle(filtersList, "UI Ligera (anti-crash UI)", state.SafeUIMode, function(v) state.SafeUIMode = v end)
 	addToggle(filtersList, "Guardar Scripts", state.SaveScripts, function(v) state.SaveScripts = v end)
-	addToggle(filtersList, "Decompiler (timeout 0.9s)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
+	addToggle(filtersList, "Decompiler (puede ralentizar)", state.UseDecompiler, function(v) state.UseDecompiler = v end)
 	addToggle(filtersList, "Ignorar Jugadores", state.IgnorePlayers, function(v) state.IgnorePlayers = v end)
 	addToggle(filtersList, "Animaciones -> Keyframes", state.ConvertAnimationsToKeyframes, function(v) state.ConvertAnimationsToKeyframes = v end)
 	addToggle(filtersList, "Muestrear 2s Anim (30 FPS)", false, function(v) state.KeyframeDuration = v and 2 or 0 end)

@@ -303,6 +303,18 @@ function Serializer.New(ReflectionModule)
 		DirectSourceCount = 0,
 		NilCount = 0,
 		KeyframeSequencesCount = 0,
+		UnknownClassCount = 0,
+		UnknownClasses = {},
+		PropertyErrorCount = 0,
+		ContentOpaqueCount = 0,
+		ContentObjectUnsupportedCount = 0,
+		UnreadableContentCount = 0,
+		SharedStringCount = 0,
+		UnreadableGeometryCount = 0,
+		SharedStringEntries = {},
+		SharedStringKeys = {},
+		SolidModelCount = 0,
+		WriteError = nil,
 		Cancelled = false,
 		ChunkBuffer = {},
 		PendingChunkBytes = 0,
@@ -325,10 +337,9 @@ function Serializer.New(ReflectionModule)
 		end
 		local list = {}
 		for propName, propType in pairs(rawProps) do
-			if propName ~= "MaterialColors" then
-				table.insert(list, { name = propName, propType = propType })
-			end
+			table.insert(list, { name = propName, propType = propType })
 		end
+		table.sort(list, function(a, b) return a.name < b.name end)
 		self.CompiledPropListCache[className] = list
 		return list
 	end
@@ -353,7 +364,19 @@ function Serializer.New(ReflectionModule)
 			string.format("Velocidad escritura: %.1f KB/s", rate),
 			string.format("Scripts -> Source directo: %d | Decompilados: %d | Bytecode B64: %d", self.DirectSourceCount, self.DecompiledCount, self.BytecodeFallbackCount),
 			"NilInstances: " .. tostring(self.NilCount),
+			"Clases no soportadas: " .. tostring(self.UnknownClassCount),
+			"Propiedades con error: " .. tostring(self.PropertyErrorCount),
+			"Content opaco no exportable: " .. tostring(self.ContentOpaqueCount),
+			"Content Object no compatible: " .. tostring(self.ContentObjectUnsupportedCount),
+			"Referencias Content ilegibles: " .. tostring(self.UnreadableContentCount),
+			"SharedStrings exportados: " .. tostring(self.SharedStringCount),
+			"Datos internos de geometría ilegibles: " .. tostring(self.UnreadableGeometryCount),
+			"Operaciones CSG detectadas: " .. tostring(self.SolidModelCount),
+			"Error de escritura: " .. tostring(self.WriteError or "ninguno"),
 		}
+		for className, count in pairs(self.UnknownClasses) do
+			table.insert(lines, "Clase omitida: " .. tostring(className) .. " x" .. tostring(count))
+		end
 		pcall(writefile, self.ReportFile, table.concat(lines, "\n"))
 	end
 
@@ -368,18 +391,31 @@ function Serializer.New(ReflectionModule)
 		return ref
 	end
 
-	function self:Flush(force: boolean?)
+	function self:Flush(force: boolean?): (boolean, string?)
 		local buf = self.ChunkBuffer
-		if #buf == 0 then return end
-		if not force and self.PendingChunkBytes < self.FlushThresholdBytes then return end
+		if not self.StreamFile then return true, nil end
+		if #buf == 0 then return true, nil end
+		if not force and self.PendingChunkBytes < self.FlushThresholdBytes then return true, nil end
 
 		local chunk = table.concat(buf, "\n") .. "\n"
+		if self.StreamFile then
+			if typeof(appendfile) ~= "function" then
+				self.WriteError = "appendfile no está disponible"
+				self.Cancelled = true
+				return false, self.WriteError
+			end
+			local okAppend, appendResult = pcall(appendfile, self.StreamFile, chunk)
+			if not okAppend or appendResult == false then
+				self.WriteError = "appendfile falló: " .. tostring(appendResult)
+				self.Cancelled = true
+				return false, self.WriteError
+			end
+		end
+
+		-- Clear only after the write succeeded. This prevents silent loss of chunks.
 		clearTable(buf)
 		self.PendingChunkBytes = 0
-
-		if self.StreamFile and typeof(appendfile) == "function" then
-			pcall(appendfile, self.StreamFile, chunk)
-		end
+		return true, nil
 	end
 
 	function self:Emit(line: string)
@@ -389,7 +425,10 @@ function Serializer.New(ReflectionModule)
 		self.EstimatedBytes += lineBytes
 		self.PendingChunkBytes += lineBytes
 		if self.PendingChunkBytes >= self.FlushThresholdBytes then
-			self:Flush(false)
+			local flushOk = self:Flush(false)
+			if not flushOk then
+				self.Cancelled = true
+			end
 		end
 	end
 
@@ -404,11 +443,65 @@ function Serializer.New(ReflectionModule)
 			return '<BinaryString name="' .. name .. '">' .. toBase64(tostring(val)) .. '</BinaryString>'
 		end,
 		Content = function(name, val)
-			local s = tostring(val)
-			if s == "" then
+			local function nullContent()
 				return '<Content name="' .. name .. '"><null></null></Content>'
 			end
-			return '<Content name="' .. name .. '"><url>' .. escapeXml(s) .. '</url></Content>'
+
+			-- Legacy values may still arrive as strings through compatibility aliases.
+			if type(val) == "string" then
+				if val == "" then return nullContent() end
+				return '<Content name="' .. name .. '"><uri>' .. escapeXml(val) .. '</uri></Content>'
+			end
+
+			-- Current Roblox Content values carry a source type. Preserve URI and
+			-- Instance-backed references where the XML format can represent them.
+			local typeOk, sourceType = pcall(function() return val.SourceType end)
+			if typeOk and Enum and Enum.ContentSourceType then
+				if sourceType == Enum.ContentSourceType.None then
+					return nullContent()
+				elseif sourceType == Enum.ContentSourceType.Uri then
+					local uriOk, uri = pcall(function() return val.Uri end)
+					if uriOk and type(uri) == "string" and uri ~= "" then
+						return '<Content name="' .. name .. '"><uri>' .. escapeXml(uri) .. '</uri></Content>'
+					end
+					return nullContent()
+				elseif sourceType == Enum.ContentSourceType.Object then
+					-- RBXMX Content XML supports URI/null values; do not write an
+					-- unverified <Ref> child that could make the whole file invalid.
+					self.ContentObjectUnsupportedCount += 1
+					return nullContent()
+				else
+					-- Opaque content has no URI or readable object to serialize.
+					self.ContentOpaqueCount += 1
+					return nullContent()
+				end
+			end
+
+			local stringOk, stringValue = pcall(tostring, val)
+			if not stringOk or type(stringValue) ~= "string" or stringValue == "" or stringValue == "Content.none" or stringValue == "None" then
+				return nullContent()
+			end
+			return '<Content name="' .. name .. '"><uri>' .. escapeXml(stringValue) .. '</uri></Content>'
+		end,
+		SharedString = function(name, val)
+			local data = tostring(val or "")
+			if data == "" then
+				-- Empty SharedStrings are the default value; omit the property.
+				return ""
+			end
+			local existingKey = self.SharedStringKeys[data]
+			if not existingKey then
+				self.SharedStringCount += 1
+				-- The RBXMX shared-string key is an opaque unique token. The
+				-- reference and definition use the same Base64 key.
+				existingKey = toBase64("ZeryuxSharedString" .. tostring(self.SharedStringCount))
+				self.SharedStringKeys[data] = existingKey
+				self.SharedStringEntries[#self.SharedStringEntries + 1] = {
+					key = existingKey,
+					value = toBase64(data),
+				}
+			end
+			return '<SharedString name="' .. name .. '">' .. existingKey .. '</SharedString>'
 		end,
 		bool = function(name, val)
 			return '<bool name="' .. name .. '">' .. (val and "true" or "false") .. '</bool>'
@@ -604,8 +697,13 @@ function Serializer.New(ReflectionModule)
 
 	function self:WriteNodeOpen(instance: Instance, options, onProgress)
 		local className = instance.ClassName
+		if instance:IsA("PartOperation") then
+			self.SolidModelCount += 1
+		end
 		local propList = self:GetCompiledPropList(className)
 		if not propList then
+			self.UnknownClassCount += 1
+			self.UnknownClasses[className] = (self.UnknownClasses[className] or 0) + 1
 			return false
 		end
 
@@ -649,13 +747,40 @@ function Serializer.New(ReflectionModule)
 				end
 			else
 				local ok, val = readPropDirect(instance, propName)
-				if not ok and canHidden then
+				local aliases = self.Reflection.LegacyContentAliases
+				local classAliases = aliases and aliases[instance.ClassName]
+				local legacyName = classAliases and classAliases[propName]
+				if (not ok or val == nil) and legacyName then
+					ok, val = readPropDirect(instance, legacyName)
+				end
+				if (not ok or val == nil) and canHidden then
 					ok, val = pcall(gethiddenproperty, instance, propName)
+					if (not ok or val == nil) and legacyName then
+						ok, val = pcall(gethiddenproperty, instance, legacyName)
+					end
+				end
+				if not ok and propType == "Content" then
+					self.UnreadableContentCount += 1
+				elseif not ok and (propType == "BinaryString" or propType == "SharedString")
+					and (propName == "ChildData" or propName == "MeshData" or propName == "PhysicsData"
+						or propName == "ChildData2" or propName == "MeshData2" or propName == "PhysicalConfigData"
+						or propName == "AeroMeshData") then
+					self.UnreadableGeometryCount += 1
 				end
 				if ok and val ~= nil and TypeHandlers[propType] then
 					if propName == "Name" or not ignoreDefaults or not isDefaultProp(propName, val) then
-						self:Emit(TypeHandlers[propType](propName, val))
+						local emitOk, xmlOrErr = pcall(TypeHandlers[propType], propName, val)
+						if emitOk and type(xmlOrErr) == "string" then
+							if xmlOrErr ~= "" then
+								self:Emit(xmlOrErr)
+							end
+						else
+							self.PropertyErrorCount += 1
+							self:Emit('<!-- Property serialization failed: ' .. escapeXml(propName) .. ' -->')
+						end
 					end
+				elseif ok and val ~= nil and not TypeHandlers[propType] then
+					self.PropertyErrorCount += 1
 				end
 			end
 		end
@@ -704,9 +829,13 @@ function Serializer.New(ReflectionModule)
 				sinceGc += 1
 				sinceCheckpoint += 1
 
-				if (os.clock() - lastYield) >= 0.30 then
+				if (os.clock() - lastYield) >= (tonumber(options.YieldInterval) or 0.75) then
 					lastYield = os.clock()
 					self:Flush(false)
+					if self.WriteError then
+						self.Cancelled = true
+						break
+					end
 					if sinceGc >= 15000 then
 						sinceGc = 0
 						pcall(collectgarbage, "step", 64)
@@ -746,6 +875,18 @@ function Serializer.New(ReflectionModule)
 		end
 	end
 
+	function self:EmitSharedStrings()
+		if #self.SharedStringEntries == 0 then
+			return
+		end
+		self:Emit("<SharedStrings>")
+		for i = 1, #self.SharedStringEntries do
+			local entry = self.SharedStringEntries[i]
+			self:Emit('<SharedString md5="' .. entry.key .. '">' .. entry.value .. '</SharedString>')
+		end
+		self:Emit("</SharedStrings>")
+	end
+
 	function self:RunToFile(fileName: string?, options, onProgress): (boolean, string, number)
 		local startClock = os.clock()
 		self.ReferentCount = 0
@@ -759,6 +900,18 @@ function Serializer.New(ReflectionModule)
 		self.DirectSourceCount = 0
 		self.NilCount = 0
 		self.KeyframeSequencesCount = 0
+		self.UnknownClassCount = 0
+		clearTable(self.UnknownClasses)
+		self.PropertyErrorCount = 0
+		self.ContentOpaqueCount = 0
+		self.ContentObjectUnsupportedCount = 0
+		self.UnreadableContentCount = 0
+		self.SharedStringCount = 0
+		self.UnreadableGeometryCount = 0
+		clearTable(self.SharedStringEntries)
+		clearTable(self.SharedStringKeys)
+		self.SolidModelCount = 0
+		self.WriteError = nil
 		self.Cancelled = false
 
 		self:RecordStep("START -> " .. tostring(fileName))
@@ -773,8 +926,9 @@ function Serializer.New(ReflectionModule)
 		}, "\n") .. "\n"
 
 		if self.StreamFile then
-			local okWrite, errWrite = pcall(writefile, self.StreamFile, header)
-			if not okWrite then
+			local okWrite, writeResult = pcall(writefile, self.StreamFile, header)
+			if not okWrite or writeResult == false then
+				local errWrite = writeResult
 				self.StreamFile = nil
 				canStream = false
 				self:WriteReport("ERROR_WRITEFILE: " .. tostring(errWrite), os.clock() - startClock, tostring(fileName))
@@ -842,31 +996,43 @@ function Serializer.New(ReflectionModule)
 			end
 		end
 
+		if self.WriteError then
+			local elapsedWriteFail = os.clock() - startClock
+			self:WriteReport("ERROR_APPENDFILE: " .. tostring(self.WriteError), elapsedWriteFail, tostring(fileName))
+			return false, tostring(self.WriteError), self.EstimatedBytes
+		end
+
+		self:EmitSharedStrings()
 		self:Emit("</roblox>")
+		local finalFlushOk, finalFlushError = self:Flush(true)
+		if not finalFlushOk then
+			local elapsedFlushFail = os.clock() - startClock
+			self:WriteReport("ERROR_FINAL_FLUSH: " .. tostring(finalFlushError), elapsedFlushFail, tostring(fileName))
+			return false, tostring(finalFlushError), self.EstimatedBytes
+		end
 		self:RecordStep("DONE")
 
 		local elapsed = os.clock() - startClock
 		local statusLabel = self.Cancelled and "CANCELLED" or "COMPLETED"
 
 		if canStream and self.StreamFile then
-			self:Flush(true)
 			self:WriteReport(statusLabel, elapsed, self.StreamFile)
-			return true, self.StreamFile, self.EstimatedBytes
+			return not self.Cancelled, self.StreamFile, self.EstimatedBytes
 		elseif typeof(writefile) == "function" and fileName then
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
 			clearTable(self.ChunkBuffer)
 			local okW, errW = pcall(writefile, fileName, fullXml)
-			if not okW then
+			if not okW or errW == false then
 				self:WriteReport("ERROR_WRITEFILE", elapsed, fileName)
 				return false, "Error writefile: " .. tostring(errW), #fullXml
 			end
 			self:WriteReport(statusLabel, elapsed, fileName)
-			return true, fileName, #fullXml
+			return not self.Cancelled, fileName, #fullXml
 		else
 			local fullXml = table.concat(self.ChunkBuffer, "\n")
 			clearTable(self.ChunkBuffer)
 			self:WriteReport(statusLabel, elapsed, "MEMORIA")
-			return true, "MEMORIA", #fullXml
+			return not self.Cancelled, "MEMORIA", #fullXml
 		end
 	end
 
