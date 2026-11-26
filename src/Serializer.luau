@@ -47,11 +47,82 @@ local function toBase64(data: string): string
 	return table.concat(out)
 end
 
-local function escapeXml(str: string): string
-	if not string.find(str, '[&<>"\']') then
-		return str
+-- XML 1.0 forbids most C0 control characters and malformed UTF-8 byte
+-- sequences. Roblox strings can contain arbitrary bytes, so sanitize every
+-- text node before escaping it; otherwise Studio's XML parser rejects the
+-- entire .rbxlx even when the file write itself succeeded.
+local XmlSanitizedCharCount = 0
+
+local function sanitizeXmlText(str: string): string
+	str = tostring(str or "")
+	local out = table.create(#str)
+	local outIndex = 0
+	local i = 1
+	local n = #str
+	local function add(value: string)
+		outIndex += 1
+		out[outIndex] = value
 	end
-	return str:gsub("&", "&amp;")
+	local function continuation(b: number): boolean
+		return b >= 0x80 and b <= 0xBF
+	end
+	local function xmlAllowed(cp: number): boolean
+		return cp == 0x09 or cp == 0x0A or cp == 0x0D
+			or (cp >= 0x20 and cp <= 0xD7FF)
+			or (cp >= 0xE000 and cp <= 0xFFFD)
+			or (cp >= 0x10000 and cp <= 0x10FFFF)
+	end
+
+	while i <= n do
+		local b1 = string.byte(str, i)
+		local cp, width
+		if b1 < 0x80 then
+			cp, width = b1, 1
+		elseif b1 >= 0xC2 and b1 <= 0xDF then
+			local b2 = string.byte(str, i + 1)
+			if b2 and continuation(b2) then
+				cp, width = (b1 - 0xC0) * 0x40 + (b2 - 0x80), 2
+			end
+		elseif b1 >= 0xE0 and b1 <= 0xEF then
+			local b2, b3 = string.byte(str, i + 1), string.byte(str, i + 2)
+			local validSecond = b2 and continuation(b2)
+			if b1 == 0xE0 then validSecond = b2 and b2 >= 0xA0 and b2 <= 0xBF end
+			if b1 == 0xED then validSecond = b2 and b2 >= 0x80 and b2 <= 0x9F end
+			if validSecond and b3 and continuation(b3) then
+				cp = (b1 - 0xE0) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80)
+				width = 3
+			end
+		elseif b1 >= 0xF0 and b1 <= 0xF4 then
+			local b2, b3, b4 = string.byte(str, i + 1), string.byte(str, i + 2), string.byte(str, i + 3)
+			local validSecond = b2 and continuation(b2)
+			if b1 == 0xF0 then validSecond = b2 and b2 >= 0x90 and b2 <= 0xBF end
+			if b1 == 0xF4 then validSecond = b2 and b2 >= 0x80 and b2 <= 0x8F end
+			if validSecond and b3 and continuation(b3) and b4 and continuation(b4) then
+				cp = (b1 - 0xF0) * 0x40000 + (b2 - 0x80) * 0x1000
+					+ (b3 - 0x80) * 0x40 + (b4 - 0x80)
+				width = 4
+			end
+		end
+
+		if not width then
+			-- Keep the text valid UTF-8 without allowing a broken byte to poison XML.
+			add("\239\191\189")
+			XmlSanitizedCharCount += 1
+			i += 1
+		elseif xmlAllowed(cp) then
+			add(string.sub(str, i, i + width - 1))
+			i += width
+		else
+			XmlSanitizedCharCount += 1
+			i += width
+		end
+	end
+	return table.concat(out)
+end
+
+local function escapeXml(str: string): string
+	local clean = sanitizeXmlText(str)
+	return clean:gsub("&", "&amp;")
 		:gsub("<", "&lt;")
 		:gsub(">", "&gt;")
 		:gsub('"', "&quot;")
@@ -59,7 +130,9 @@ local function escapeXml(str: string): string
 end
 
 local function formatProtectedString(name: string, src: string): string
-	local safeCdata = string.find(src, "]]>", 1, true) and string.gsub(src, "]]>", "]]]]><![CDATA[>") or src
+	local clean = sanitizeXmlText(src)
+	local safeCdata = string.find(clean, "]]>", 1, true)
+		and string.gsub(clean, "]]>", "]]]]><![CDATA[>") or clean
 	return '<ProtectedString name="' .. name .. '"><![CDATA[' .. safeCdata .. ']]></ProtectedString>'
 end
 
@@ -372,6 +445,7 @@ function Serializer.New(ReflectionModule)
 			"SharedStrings exportados: " .. tostring(self.SharedStringCount),
 			"Datos internos de geometría ilegibles: " .. tostring(self.UnreadableGeometryCount),
 			"Operaciones CSG detectadas: " .. tostring(self.SolidModelCount),
+			"Caracteres/bytes XML invalidos saneados: " .. tostring(XmlSanitizedCharCount),
 			"Error de escritura: " .. tostring(self.WriteError or "ninguno"),
 		}
 		for className, count in pairs(self.UnknownClasses) do
@@ -913,6 +987,7 @@ function Serializer.New(ReflectionModule)
 		self.SolidModelCount = 0
 		self.WriteError = nil
 		self.Cancelled = false
+		XmlSanitizedCharCount = 0
 
 		self:RecordStep("START -> " .. tostring(fileName))
 

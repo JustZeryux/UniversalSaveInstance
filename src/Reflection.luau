@@ -358,9 +358,10 @@ local Classes = {
 		Properties = {
 			Scale = "Vector3",
 			Offset = "Vector3",
-			VertexColor = "Vector3",
+			VertexColor = "Color3",
 		}
 	},
+	BlockMesh = { Inherits = "DataModelMesh", Properties = {} },
 	FileMesh = {
 		Inherits = "DataModelMesh",
 		Properties = {
@@ -543,6 +544,9 @@ local Classes = {
 
 	-- Física, attachments y conexiones
 	Attachment = { Inherits = "Instance", Properties = { CFrame = "CoordinateFrame", Visible = "bool" } },
+	-- Bone inherits Attachment. Transform is NotReplicated and cannot be saved
+	-- by Roblox; keep the bone node and its inherited reference CFrame only.
+	Bone = { Inherits = "Attachment", Properties = {} },
 	Weld = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", C0 = "CoordinateFrame", C1 = "CoordinateFrame", Enabled = "bool" } },
 	WeldConstraint = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", Enabled = "bool" } },
 	Motor6D = { Inherits = "Instance", Properties = { Part0 = "Ref", Part1 = "Ref", C0 = "CoordinateFrame", C1 = "CoordinateFrame", Enabled = "bool" } },
@@ -804,6 +808,19 @@ local Classes = {
 		Properties = {
 			MinTextSize = "int",
 			MaxTextSize = "int",
+		}
+	},
+	UIScale = { Inherits = "Instance", Properties = { Scale = "float" } },
+	Configuration = { Inherits = "Instance", Properties = {} },
+	KeyframeMarker = { Inherits = "Instance", Properties = { Value = "string" } },
+	BodyPartDescription = {
+		Inherits = "Instance",
+		Properties = {
+			AssetId = "int64",
+			BodyPart = "token",
+			Color = "Color3",
+			HeadShape = "string",
+			Instance = "Ref",
 		}
 	},
 	UIListLayout = {
